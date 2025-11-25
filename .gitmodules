@@ -1,0 +1,9 @@
+[submodule "OpenTSLM"]
+	path = OpenTSLM
+	url = https://github.com/StanfordBDHG/OpenTSLM.git
+[submodule "facet"]
+	path = facet
+	url = https://github.com/stellargo/facet.git
+[submodule "Social-IQ-2.0-Challenge"]
+	path = Social-IQ-2.0-Challenge
+	url = https://github.com/abwilf/Social-IQ-2.0-Challenge.git
