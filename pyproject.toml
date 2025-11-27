@@ -1,0 +1,10 @@
+[project]
+name = "openpsytslm"
+version = "0.1.0"
+description = "Open-source implementation of the PsyTSLM pipeline enabling synthesis of non-verbal and verbal information during dyadic interactions"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.3.3",
+    "yt-dlp>=2025.11.12",
+]

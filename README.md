@@ -3,11 +3,11 @@ Open-source implementation of the PsyTSLM pipeline enabling synthesis of non-ver
 
 ## Installation
 
-This project uses [UV](https://docs.astral.sh/uv/) for fast and reliable Python package management. UV provides a unified virtual environment that combines dependencies from both the OpenTSLM and facet submodules.
+This project uses [UV](https://docs.astral.sh/uv/) Python package management. 
 
 ### Prerequisites
 
-1. Install UV (if not already installed):
+1. Install UV:
    ```bash
    # Windows (PowerShell)
    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
@@ -18,38 +18,31 @@ This project uses [UV](https://docs.astral.sh/uv/) for fast and reliable Python 
 
 ### Setup
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/mltrinhammer/openpsytslm.git
-   cd openpsytslm
-   ```
+#### Option A — Clone fresh (recommended)
 
-2. Create and activate a virtual environment with UV:
-   ```bash
-   # Create virtual environment
-   uv venv
-   
-   # Activate the virtual environment
-   # On Windows (PowerShell):
-   .venv\Scripts\Activate.ps1
-   
-   # On Windows (Command Prompt):
-   .venv\Scripts\activate.bat
-   
-   # On macOS/Linux:
-   source .venv/bin/activate
-   ```
-0
-3. Install all dependencies:
-   ```bash
-   uv pip install -r requirements.txt
-   ```
+```bash
+git clone --recurse-submodules https://github.com/your-username/openpsytslm.git
+cd openpsytslm
+```
 
+#### Option B — If you already cloned the repo
 
+```bash
+git submodule update --init --recursive
+```
 
+#### Create environment and sync dependencies
 
-## Project Structure
+```bash
+# Create a unified virtual environment using UV
+uv venv
 
-- `OpenTSLM/` - Time Series Language Model components
-- `facet/` - Facial expression analysis and computer vision modules
-- `requirements.txt` - Combined dependencies for the entire project
+# Install / sync dependencies for the repository
+uv sync
+```
+
+If you prefer, you can install dependencies directly from the root `requirements.txt`:
+
+```bash
+uv pip install -r requirements.txt
+```
