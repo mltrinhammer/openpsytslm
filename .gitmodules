@@ -5,3 +5,6 @@
 	path = external/opentslm
 	url = git@github.com:StanfordBDHG/OpenTSLM.git
 
+[submodule "external/OpenFace-3.0"]
+	path = external/OpenFace-3.0
+	url = https://github.com/CMU-MultiComp-Lab/OpenFace-3.0.git
