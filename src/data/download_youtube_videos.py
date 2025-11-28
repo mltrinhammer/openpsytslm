@@ -48,9 +48,12 @@ def download_video(row, output_dir, skip_existing=True):
         }
     
     # yt-dlp options
+    # Use pre-merged formats to avoid ffmpeg dependency:
+    # - 'best[ext=mp4]' gets best quality single file (video+audio already combined)
+    # - 'best' fallback for any available format
+    # - '18' = 360p mp4, '22' = 720p mp4 (classic pre-merged YouTube formats)
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'merge_output_format': 'mp4',
+        'format': 'best[ext=mp4]/best',  # No merging needed = no ffmpeg
         'outtmpl': str(output_path),
         'quiet': True,
         'no_warnings': True,
