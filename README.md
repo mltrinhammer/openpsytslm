@@ -45,3 +45,12 @@ uv venv
 uv sync
 ```
 
+### Language pipeline (`src/process_data/transcribe.py`)
+Create your own `config_language.yaml` file with the following lines. Remember to login to HF and request access to pyannote
+
+```yaml
+hf_token: "hf_xxxxxxxxxxxxxxxxxxx"
+diary_model: pyannote/speaker-diarization-3.1
+whisper_model_size: large
+whisper_language: en
+```
