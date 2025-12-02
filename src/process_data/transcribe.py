@@ -1145,8 +1145,8 @@ def process_files_parallel(
 # ============================================================================
 
 def discover_audio_files(input_dir: Path, temp_audio_dir: Optional[Path] = None) -> List[Path]:
-    """Discover audio and video files recursively."""
-    extensions = ["*.wav", "*.mp3", "*.flac", "*.mp4", "*.mov", "*.avi"]
+    """Discover audio files recursively (WAV only)."""
+    extensions = ["*.wav"]
     files = []
     for ext in extensions:
         files.extend(input_dir.rglob(ext))
