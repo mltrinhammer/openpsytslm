@@ -606,7 +606,7 @@ def _load_with_ffmpeg(file_path: Path, target_sr: int, mono: bool) -> Tuple[torc
         else:
             # Reshape to (samples, channels) then transpose to (channels, samples)
             audio_array = audio_array.reshape(-1, channels)
-            waveform = torch.from_numpy(audio_array.T).float()
+            waveform = torch.from_numpy(audio_array.T).copy().float()
         
         duration = waveform.shape[1] / target_sr
         print(f"[transcribe] ffmpeg extracted: {duration:.1f}s, {waveform.shape[0]} channel(s)")

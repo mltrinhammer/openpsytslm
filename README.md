@@ -53,4 +53,12 @@ hf_token: "hf_xxxxxxxxxxxxxxxxxxx"
 diary_model: pyannote/speaker-diarization-3.1
 whisper_model_size: large
 whisper_language: en
+both_speakers: true
+min_segment_ms: 1500
+audio_sample_rate: 16000
+audio_channels: 1
+whisper_beam_size: 3
+whisper_batch_size: 8
+whisper_compute_type: "float16"
+
 ```
