@@ -4,14 +4,28 @@ import sys
 import csv
 import shutil
 import tempfile
+from pathlib import Path
+
 import torch
 import cv2
 import numpy as np
-from pathlib import Path
 import torch.multiprocessing as mp
 import traceback
 
-# OpenFace Imports
+# Parse args BEFORE importing openface (it has argparse side effects at import time)
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input_dir', required=True)
+    parser.add_argument('--output_dir', required=True)
+    parser.add_argument('--weights_root', default='./external/OpenFace-3.0')
+    parser.add_argument('--num_gpus', type=int, default=None, help="Manually set number of GPUs to use")
+    return parser.parse_args()
+
+# Parse args early to avoid conflict with openface's argparse
+_args = parse_args()
+
+# OpenFace Imports (from openface-test package)
+# Note: openface-test has argparse code that runs at import time
 from openface.face_detection import FaceDetector
 from openface.multitask_model import MultitaskPredictor
 
@@ -192,12 +206,8 @@ def worker_fn(rank, gpu_id, video_queue, args):
 # MAIN
 # -----------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input_dir', required=True)
-    parser.add_argument('--output_dir', required=True)
-    parser.add_argument('--weights_root', default='./external/OpenFace-3.0')
-    parser.add_argument('--num_gpus', type=int, default=None, help="Manually set number of GPUs to use")
-    args = parser.parse_args()
+    # Use the pre-parsed args (parsed before openface import to avoid conflicts)
+    args = _args
 
     # 1. Setup
     input_path = Path(args.input_dir)
