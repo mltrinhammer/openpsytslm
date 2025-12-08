@@ -26,8 +26,10 @@ import matplotlib.pyplot as plt
 from transformers import pipeline
 import yaml 
 
-# GPU monitoring
+# GPU monitoring (nvidia-ml-py provides pynvml module)
 try:
+    # nvidia-ml-py is the maintained package (pynvml is deprecated)
+    # Install with: pip install nvidia-ml-py
     import pynvml
     PYNVML_AVAILABLE = True
 except ImportError:
@@ -182,6 +184,19 @@ def extract_au_window(csv_path: Path, start_ms: float, end_ms: float, au_columns
     """
     # Read CSV with whitespace handling
     df = pd.read_csv(csv_path, skipinitialspace=True)
+    
+    # Strip whitespace from column names (OpenFace often has leading spaces)
+    df.columns = df.columns.str.strip()
+    
+    # Check if requested columns exist
+    missing_cols = [col for col in au_columns if col not in df.columns]
+    if missing_cols:
+        # Try to find similar columns for helpful error message
+        au_cols_in_file = [col for col in df.columns if 'AU' in col.upper()]
+        raise KeyError(
+            f"Columns {missing_cols} not found in {csv_path.name}. "
+            f"Available AU columns: {au_cols_in_file[:10]}{'...' if len(au_cols_in_file) > 10 else ''}"
+        )
     
     # Convert timestamp from seconds to milliseconds
     df['timestamp_ms'] = df['timestamp'] * 1000
@@ -420,7 +435,8 @@ def process_video(
     pipe,
     output_dir: Path,
     au_names: List[str],
-    max_turns: int = None
+    max_turns: int = None,
+    skip_existing: bool = True
 ) -> List[Dict[str, Any]]:
     """Process a single video for description generation.
     
@@ -432,10 +448,17 @@ def process_video(
         output_dir: Directory to save plots and results
         au_names: List of AU names to analyze
         max_turns: Maximum number of turns to process (None = all)
+        skip_existing: If True, skip videos that already have output JSON files
     
     Returns:
-        List of results dicts
+        List of results dicts (empty if skipped)
     """
+    # Check if output already exists
+    output_json = output_dir / f"{video_id}_descriptions.json"
+    if skip_existing and output_json.exists():
+        print(f"⏭️ Skipping {video_id} - output already exists: {output_json}")
+        return []
+    
     speaker1_csv = Path(video_data['AUs_speaker_1'])
     speaker2_csv = Path(video_data['AUs_speaker_2'])
     transcript_json = Path(video_data['transcription_path'])
@@ -526,7 +549,8 @@ def gpu_worker(
     au_columns: List[str],
     max_turns_per_video: Optional[int],
     result_queue: mp.Queue,
-    log_interval: int = 10
+    log_interval: int = 10,
+    skip_existing: bool = True
 ):
     """
     Worker function that runs on a specific GPU.
@@ -539,6 +563,7 @@ def gpu_worker(
         max_turns_per_video: Max turns per video (None = all)
         result_queue: Queue to send results back to main process
         log_interval: Log GPU stats every N turns
+        skip_existing: If True, skip videos that already have output JSON files
     """
     try:
         # Set device for this worker
@@ -585,7 +610,8 @@ def gpu_worker(
                 pipe,
                 output_dir,
                 au_columns,
-                max_turns=max_turns_per_video
+                max_turns=max_turns_per_video,
+                skip_existing=skip_existing
             )
             
             # Save immediately after each video
@@ -685,8 +711,8 @@ def main():
     parser.add_argument(
         "--au_columns",
         nargs="+",
-        default=['AU01_r', 'AU02_r', 'AU04_r', 'AU05_r'],
-        help="AU columns to analyze (default: 4 key AUs)"
+        default=['AU_01', 'AU_02', 'AU_04', 'AU_05'],
+        help="AU columns to analyze (default: AU_01, AU_02, AU_04, AU_05)"
     )
     parser.add_argument(
         "--gpus",
@@ -705,8 +731,16 @@ def main():
         default=5,
         help="Log GPU stats every N videos (default: 5)"
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing output files (default: skip existing)"
+    )
     
     args = parser.parse_args()
+    
+    # Derive skip_existing from overwrite flag
+    skip_existing = not args.overwrite
     
     print("🚀 Starting AU time-series description generation with Gemma-3 multimodal pipeline")
     print("=" * 80)
@@ -792,7 +826,8 @@ def main():
                 pipe,
                 args.output_dir,
                 args.au_columns,
-                max_turns=args.max_turns_per_video
+                max_turns=args.max_turns_per_video,
+                skip_existing=skip_existing
             )
             all_results.extend(results)
             
@@ -838,7 +873,8 @@ def main():
                     args.au_columns,
                     args.max_turns_per_video,
                     result_queue,
-                    args.log_interval
+                    args.log_interval,
+                    skip_existing
                 )
             )
             p.start()
