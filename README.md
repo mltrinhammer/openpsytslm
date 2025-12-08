@@ -1,9 +1,11 @@
 # openpsytslm
 Open-source implementation of the PsyTSLM pipeline enabling synthesis of non-verbal and verbal information during dyadic interactions
 
-# TODO: 
+# Regarding OpenFace integration
 I am integrating OpenFace 3.0 and OpenTSLM as submodules.
-OpenFace 3.0 does not display its submodules in a .gitmodules file; users that clone this present repo, will therefore not get the full dependencies for Open Face 3.0. Need to find a way to ensure future users of this repo does not face that bug
+OpenFace 3.0 does not display its submodules in a .gitmodules file; users that clone this present repo, will therefore not get the full dependencies for Open Face 3.0. 
+I recommend manually creating a .gitmodules file in the OpenFace-3.0 directory and adding _their_ dependencies to it. Will look for more robust fix moving forward.
+
 
 ## Installation
 

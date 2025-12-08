@@ -24,10 +24,16 @@ def parse_args():
 # Parse args early to avoid conflict with openface's argparse
 _args = parse_args()
 
+_saved_argv = sys.argv
+sys.argv = [sys.argv[0]]
+
 # OpenFace Imports (from openface-test package)
 # Note: openface-test has argparse code that runs at import time
 from openface.face_detection import FaceDetector
 from openface.multitask_model import MultitaskPredictor
+
+#restore sys.argv
+sys.argv = _saved_argv
 
 # -----------------------------------------------------------------------------
 # HELPER: TEMP FILE HANDLER

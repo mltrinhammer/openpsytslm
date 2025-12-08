@@ -5,13 +5,16 @@ description = "Open-source implementation of the PsyTSLM pipeline enabling synth
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "accelerate>=1.12.0",
     "click==8.1.7",
-    "huggingface-hub==0.21.0",
+    "huggingface-hub>=0.36.0",
     "imageio==2.34.2",
     "matplotlib==3.10.1",
     "numpy<2",
+    "nvidia-ml-py>=13.580.82",
     "opencv-contrib-python==4.11.0.86",
     "opencv-python==4.9.0.80",
+    "openface-test>=0.1.13",
     "pandas==2.2.3",
     "pillow==9.4.0",
     "scikit-image>=0.24.0",
@@ -22,5 +25,6 @@ dependencies = [
     "torch>=2.9.1",
     "torchvision>=0.24.1",
     "tqdm==4.66.2",
+    "transformers>=4.40.2",
     "yt-dlp>=2025.11.12",
 ]
