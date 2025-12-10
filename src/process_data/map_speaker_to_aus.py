@@ -197,7 +197,7 @@ def process_video(video_path: Path,
     
     Args:
         video_path: Path to source video
-        transcript_dir: Directory containing transcription JSONs
+        transcript_dir: Directory containing transcription JSONs (flat or nested)
         au_dir: Directory containing AU CSV files
         fps: Video frame rate
     
@@ -206,8 +206,18 @@ def process_video(video_path: Path,
     """
     video_stem = video_path.stem
     
-    # Find transcription file
+    # Find transcription file - try both flat and nested structure
+    # First try nested: transcript_dir/video_stem/results_{video_stem}.json
     transcript_path = transcript_dir / video_stem / f"results_{video_stem}.json"
+    
+    # If not found, try flat structure: transcript_dir/results_{video_stem}.json
+    if not transcript_path.exists():
+        transcript_path = transcript_dir / f"results_{video_stem}.json"
+    
+    # Try without "results_" prefix
+    if not transcript_path.exists():
+        transcript_path = transcript_dir / f"{video_stem}.json"
+    
     if not transcript_path.exists():
         print(f"Warning: Transcription not found for {video_stem}")
         return None
@@ -269,7 +279,7 @@ Examples:
     parser.add_argument("--video_dir", type=str, required=True,
                         help="Directory containing source video files (*.mp4)")
     parser.add_argument("--transcript_dir", type=str, required=True,
-                        help="Directory containing transcription subdirectories")
+                        help="Directory containing transcription JSON files (flat or nested structure)")
     parser.add_argument("--au_dir", type=str, required=True,
                         help="Directory containing AU CSV files")
     parser.add_argument("--output", type=str, default="data_model.yaml",
