@@ -27,7 +27,14 @@ def load_transcription(json_path: Path) -> List[Dict]:
     """Load transcription JSON file."""
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    return data
+    
+    # Handle both list format and dict with 'summaries' key
+    if isinstance(data, dict) and 'summaries' in data:
+        return data['summaries']
+    elif isinstance(data, list):
+        return data
+    else:
+        return []
 
 
 def load_au_csv(csv_path: Path) -> pd.DataFrame:
@@ -48,9 +55,18 @@ def get_speaking_intervals(transcription: List[Dict], speaker: str) -> List[Tupl
     """
     intervals = []
     for segment in transcription:
-        if segment.get("speaker") == speaker:
-            start = segment.get("start", 0)
-            end = segment.get("end", 0)
+        # Handle both 'speaker' and 'speaker_id' keys
+        segment_speaker = segment.get("speaker") or segment.get("speaker_id")
+        
+        if segment_speaker == speaker:
+            # Handle both seconds (start/end) and milliseconds (start_ms/end_ms)
+            if "start_ms" in segment:
+                start = segment.get("start_ms", 0) / 1000.0  # Convert ms to seconds
+                end = segment.get("end_ms", 0) / 1000.0
+            else:
+                start = segment.get("start", 0)
+                end = segment.get("end", 0)
+            
             intervals.append((start, end))
     return intervals
 
