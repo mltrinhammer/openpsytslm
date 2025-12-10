@@ -166,8 +166,15 @@ def load_data_model(yaml_path: Path) -> Dict:
 def load_speech_turns(json_path: Path) -> List[Dict]:
     """Load speech turns from transcript JSON."""
     with open(json_path, 'r') as f:
-        turns = json.load(f)
-    return turns
+        data = json.load(f)
+    
+    # Handle both list format and dict with 'summaries' key
+    if isinstance(data, dict) and 'summaries' in data:
+        return data['summaries']
+    elif isinstance(data, list):
+        return data
+    else:
+        return []
 
 
 def extract_au_window(csv_path: Path, start_ms: float, end_ms: float, au_columns: List[str]) -> pd.DataFrame:
@@ -410,20 +417,35 @@ def convert_transcript_to_turns(transcript_data: List[Dict]) -> List[Dict]:
     """Convert transcript JSON to turn format with turn_index and times in ms.
     
     Args:
-        transcript_data: List of transcript segments from transcribe.py
+        transcript_data: List of transcript segments from transcribe.py or summarize.py
                          Format: [{"text": str, "start": float, "end": float, "speaker": str}, ...]
+                         Or: [{"speaker_id": str, "start_ms": int, "end_ms": int, "summary": str}, ...]
     
     Returns:
         List of turns with turn_index, speaker_id, start_ms, end_ms
     """
     turns = []
     for idx, segment in enumerate(transcript_data):
+        # Handle both 'speaker' and 'speaker_id' keys
+        speaker_id = segment.get("speaker") or segment.get("speaker_id", "unknown")
+        
+        # Handle both seconds (start/end) and milliseconds (start_ms/end_ms)
+        if "start_ms" in segment:
+            start_ms = segment["start_ms"]
+            end_ms = segment["end_ms"]
+        else:
+            start_ms = segment.get("start", 0) * 1000
+            end_ms = segment.get("end", 0) * 1000
+        
+        # Use 'text' if available, otherwise 'summary' or 'original_text'
+        text = segment.get("text") or segment.get("summary") or segment.get("original_text", "")
+        
         turn = {
             "turn_index": idx,
-            "speaker_id": segment["speaker"],  # speaker_1 or speaker_2
-            "start_ms": segment["start"] * 1000,  # Convert seconds to ms
-            "end_ms": segment["end"] * 1000,
-            "text": segment["text"]
+            "speaker_id": speaker_id,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "text": text
         }
         turns.append(turn)
     return turns
