@@ -178,7 +178,7 @@ def create_summary_prompt(speaker_id: str, start_ms: int, end_ms: int, combined_
 
 
 
-def gpu_worker(gpu_id: int, video_paths: List[Path], model_name: str, skip_existing: bool):
+def gpu_worker(gpu_id: int, transcript_paths: List[Path], output_dir: Path, model_name: str, skip_existing: bool):
     """Worker process for GPU inference."""
     import torch
     from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -200,36 +200,31 @@ def gpu_worker(gpu_id: int, video_paths: List[Path], model_name: str, skip_exist
     
     monitor.log_status("Model loaded")
     
-    # Process videos
-    for video_idx, video_path in enumerate(video_paths):
-        summary_path = video_path.with_suffix(".summary.json")
+    # Process transcripts
+    for transcript_idx, transcript_path in enumerate(transcript_paths):
+        summary_path = output_dir / f"{transcript_path.stem}.summary.json"
         
         # Skip if exists and flag is set
         if skip_existing and summary_path.exists():
-            print(f"[GPU {gpu_id}] Skipping {video_path.name} (summary exists)")
+            print(f"[GPU {gpu_id}] Skipping {transcript_path.name} (summary exists)")
             continue
         
-        print(f"[GPU {gpu_id}] Processing {video_path.name} ({video_idx + 1}/{len(video_paths)})")
+        print(f"[GPU {gpu_id}] Processing {transcript_path.name} ({transcript_idx + 1}/{len(transcript_paths)})")
         
         try:
             # Load transcription
-            transcript_path = video_path.with_suffix(".json")
-            if not transcript_path.exists():
-                print(f"[GPU {gpu_id}] No transcript found for {video_path.name}, skipping")
-                continue
-            
             with open(transcript_path, "r", encoding="utf-8") as f:
                 transcript_data = json.load(f)
             
             turns = transcript_data.get("turns", [])
             if not turns:
-                print(f"[GPU {gpu_id}] No turns in transcript for {video_path.name}, skipping")
+                print(f"[GPU {gpu_id}] No turns in transcript for {transcript_path.name}, skipping")
                 continue
             
             # Group by speaker turns
             speaker_turns = group_text_by_speaker_turns(turns)
             if not speaker_turns:
-                print(f"[GPU {gpu_id}] No speaker turns for {video_path.name}, skipping")
+                print(f"[GPU {gpu_id}] No speaker turns for {transcript_path.name}, skipping")
                 continue
             
             # Generate summaries
@@ -271,7 +266,7 @@ def gpu_worker(gpu_id: int, video_paths: List[Path], model_name: str, skip_exist
             
             # Save summaries
             output_data = {
-                "video_path": str(video_path),
+                "transcript_path": str(transcript_path),
                 "summaries": summaries
             }
             
@@ -281,69 +276,68 @@ def gpu_worker(gpu_id: int, video_paths: List[Path], model_name: str, skip_exist
             print(f"[GPU {gpu_id}] Saved {len(summaries)} summaries to {summary_path.name}")
             
         except Exception as e:
-            print(f"[GPU {gpu_id}] Error processing {video_path.name}: {e}")
+            print(f"[GPU {gpu_id}] Error processing {transcript_path.name}: {e}")
             continue
         
-        # Log status every 5 videos
-        if (video_idx + 1) % 5 == 0:
-            monitor.log_status(f"Processed {video_idx + 1}/{len(video_paths)} videos")
+        # Log status every 5 transcripts
+        if (transcript_idx + 1) % 5 == 0:
+            monitor.log_status(f"Processed {transcript_idx + 1}/{len(transcript_paths)} transcripts")
     
     monitor.log_status("Worker finished")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate conversation summaries using multi-GPU inference")
-    parser.add_argument("--video_dir", type=str, required=True, help="Directory containing video files and transcripts")
+    parser.add_argument("--transcripts_dir", type=str, required=True, help="Directory containing transcript JSON files")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save summary JSON files")
     parser.add_argument("--model_name", type=str, default="google/gemma-2-9b-it", help="HuggingFace model name")
     parser.add_argument("--gpus", type=str, default="0,1,2,3,4,5", help="Comma-separated GPU IDs")
-    parser.add_argument("--skip_existing", action="store_true", help="Skip videos that already have summaries")
+    parser.add_argument("--skip_existing", action="store_true", help="Skip transcripts that already have summaries")
     args = parser.parse_args()
     
-    video_dir = Path(args.video_dir)
-    if not video_dir.exists():
-        raise FileNotFoundError(f"Video directory not found: {video_dir}")
+    transcripts_dir = Path(args.transcripts_dir)
+    if not transcripts_dir.exists():
+        raise FileNotFoundError(f"Transcripts directory not found: {transcripts_dir}")
     
-    # Find all video files with transcripts
-    video_files = []
-    for ext in [".mp4", ".avi", ".mov", ".mkv"]:
-        for video_path in video_dir.glob(f"*{ext}"):
-            transcript_path = video_path.with_suffix(".json")
-            if transcript_path.exists():
-                video_files.append(video_path)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    if not video_files:
-        print(f"No video files with transcripts found in {video_dir}")
+    # Find all transcript JSON files
+    transcript_files = list(transcripts_dir.glob("*.json"))
+    
+    if not transcript_files:
+        print(f"No transcript JSON files found in {transcripts_dir}")
         return
     
-    print(f"Found {len(video_files)} videos with transcripts")
+    print(f"Found {len(transcript_files)} transcript files")
     
     # Parse GPU IDs
     gpu_ids = [int(x.strip()) for x in args.gpus.split(",")]
     num_gpus = len(gpu_ids)
     print(f"Using {num_gpus} GPUs: {gpu_ids}")
     
-    # Distribute videos across GPUs (round-robin)
-    gpu_video_assignments = [[] for _ in range(num_gpus)]
-    for idx, video_path in enumerate(video_files):
+    # Distribute transcripts across GPUs (round-robin)
+    gpu_transcript_assignments = [[] for _ in range(num_gpus)]
+    for idx, transcript_path in enumerate(transcript_files):
         gpu_idx = idx % num_gpus
-        gpu_video_assignments[gpu_idx].append(video_path)
+        gpu_transcript_assignments[gpu_idx].append(transcript_path)
     
     # Print distribution
-    for gpu_idx, videos in enumerate(gpu_video_assignments):
-        print(f"GPU {gpu_ids[gpu_idx]}: {len(videos)} videos")
+    for gpu_idx, transcripts in enumerate(gpu_transcript_assignments):
+        print(f"GPU {gpu_ids[gpu_idx]}: {len(transcripts)} transcripts")
     
     # Launch workers
     mp.set_start_method("spawn", force=True)
     processes = []
     
     for gpu_idx, gpu_id in enumerate(gpu_ids):
-        video_subset = gpu_video_assignments[gpu_idx]
-        if not video_subset:
+        transcript_subset = gpu_transcript_assignments[gpu_idx]
+        if not transcript_subset:
             continue
         
         p = mp.Process(
             target=gpu_worker,
-            args=(gpu_id, video_subset, args.model_name, args.skip_existing)
+            args=(gpu_id, transcript_subset, output_dir, args.model_name, args.skip_existing)
         )
         p.start()
         processes.append(p)
