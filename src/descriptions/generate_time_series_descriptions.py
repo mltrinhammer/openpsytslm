@@ -364,12 +364,13 @@ def generate_plot_for_turn(
 def generate_description_with_pipeline(pipe, image_path: Path, turn: Dict, au_names: List[str]) -> str:
     """Generate time-series description using the Gemma-3 pipeline."""
     
-    pre_prompt = """Describe these AU heatmaps (left=speaker 1 blue, right=speaker 2 orange). 
+    pre_prompt = """Describe these AU heatmaps (left=speaker 1 blue, right=speaker 2 orange) very briefly. 
 Each row is one AU across 8 time bins. Write one compact sentence per AU comparing patterns.
 ONLY consider the AUs which shows either 1) high variability within speaker 1 or speaker 2 or 2) strong difference between speaker 1 and speaker 2
 Consider a maximum of 4 action units. 
 Format: "AU##: speaker 1 [pattern], speaker 2 [pattern], [key difference]."
-No markdown, bullets, or headers. ONLY output your description."""
+No markdown, bullets, or headers. Do not refer the facial movement associated with the AU. ONLY output your description
+."""
     
     au_list = ", ".join(au_names)
     context = f"""Turn {turn['turn_index']} ({turn['speaker_id']}), {turn['start_ms']:.0f}-{turn['end_ms']:.0f}ms
@@ -390,7 +391,7 @@ Description:"""
         # Fixed token limit: model instructed to focus only on most volatile AUs
         output = pipe(
             text=messages,
-            max_new_tokens=80,
+            max_new_tokens=125,
             do_sample=False
         )
         description = output[0]["generated_text"][-1]["content"].strip()

@@ -76,6 +76,12 @@ class GPUMonitor:
         filled = int((stats['memory_percent'] / 100) * width)
         bar = '█' * filled + '░' * (width - filled)
         return f"[{bar}] {stats['memory_used_gb']:.1f}/{stats['memory_total_gb']:.1f}GB ({stats['memory_percent']:.1f}%) | Util: {stats['utilization']}%"
+    
+    def log_status(self, message: str):
+        """Log GPU status with memory information."""
+        memory_bar = self.format_memory_bar()
+        print(f"🎮 [GPU {self.gpu_id}] {message}")
+        print(f"   {memory_bar}")
 
 
 def group_text_by_speaker_turns(turns: List[dict]) -> List[Dict]:
@@ -216,7 +222,15 @@ def gpu_worker(gpu_id: int, transcript_paths: List[Path], output_dir: Path, mode
             with open(transcript_path, "r", encoding="utf-8") as f:
                 transcript_data = json.load(f)
             
-            turns = transcript_data.get("turns", [])
+            # Handle both list format and dict with "turns" key
+            if isinstance(transcript_data, list):
+                turns = transcript_data
+            elif isinstance(transcript_data, dict):
+                turns = transcript_data.get("turns", [])
+            else:
+                print(f"[GPU {gpu_id}] Invalid transcript format for {transcript_path.name}, skipping")
+                continue
+
             if not turns:
                 print(f"[GPU {gpu_id}] No turns in transcript for {transcript_path.name}, skipping")
                 continue
@@ -303,7 +317,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Find all transcript JSON files
-    transcript_files = list(transcripts_dir.glob("*.json"))
+    transcript_files = list(transcripts_dir.rglob("*.json"))
     
     if not transcript_files:
         print(f"No transcript JSON files found in {transcripts_dir}")

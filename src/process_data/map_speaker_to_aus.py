@@ -233,7 +233,10 @@ def process_video(video_path: Path,
     # Try without "results_" prefix
     if not transcript_path.exists():
         transcript_path = transcript_dir / f"{video_stem}.json"
-    
+    if not transcript_path.exists():
+        matching_jsons = list(transcript_dir.glob(f"*{video_stem}*.json"))
+        if matching_jsons:
+            transcript_path = matching_jsons[0]    
     if not transcript_path.exists():
         print(f"Warning: Transcription not found for {video_stem}")
         return None
