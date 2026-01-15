@@ -14,6 +14,7 @@ This script:
 import sys
 import os
 import torch
+import torch.multiprocessing as mp
 import json
 import argparse
 import yaml
@@ -23,6 +24,94 @@ from typing import List, Dict, Any, Optional, Tuple
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from collections import defaultdict
+
+# GPU monitoring
+try:
+    from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo, nvmlDeviceGetUtilizationRates, nvmlDeviceGetTemperature, NVML_TEMPERATURE_GPU
+    PYNVML_AVAILABLE = True
+except ImportError:
+    PYNVML_AVAILABLE = False
+
+
+# ============================================================================
+# GPU MONITORING
+# ============================================================================
+
+class GPUMonitor:
+    """Monitor GPU memory and utilization."""
+    
+    def __init__(self, gpu_id: int):
+        self.gpu_id = gpu_id
+        self.initialized = False
+        
+        if PYNVML_AVAILABLE:
+            try:
+                nvmlInit()
+                self.handle = nvmlDeviceGetHandleByIndex(gpu_id)
+                self.initialized = True
+            except Exception as e:
+                print(f"⚠️ [GPU {gpu_id}] nvidia-ml-py init failed: {e}")
+    
+    def get_stats(self) -> Dict:
+        """Get GPU memory and utilization stats."""
+        stats = {
+            'memory_used_gb': 0,
+            'memory_total_gb': 0,
+            'memory_percent': 0,
+            'utilization': 0,
+            'temperature': 0
+        }
+        
+        if not self.initialized:
+            if torch.cuda.is_available():
+                try:
+                    stats['memory_used_gb'] = torch.cuda.memory_allocated(self.gpu_id) / 1e9
+                    stats['memory_total_gb'] = torch.cuda.get_device_properties(self.gpu_id).total_memory / 1e9
+                    stats['memory_percent'] = (stats['memory_used_gb'] / stats['memory_total_gb']) * 100
+                except Exception:
+                    pass
+            return stats
+        
+        try:
+            mem_info = nvmlDeviceGetMemoryInfo(self.handle)
+            util_info = nvmlDeviceGetUtilizationRates(self.handle)
+            temp = nvmlDeviceGetTemperature(self.handle, NVML_TEMPERATURE_GPU)
+            
+            stats['memory_used_gb'] = mem_info.used / 1e9
+            stats['memory_total_gb'] = mem_info.total / 1e9
+            stats['memory_percent'] = (mem_info.used / mem_info.total) * 100
+            stats['utilization'] = util_info.gpu
+            stats['temperature'] = temp
+        except Exception:
+            pass
+        
+        return stats
+    
+    def format_memory_bar(self, width: int = 25) -> str:
+        """Create visual memory bar."""
+        stats = self.get_stats()
+        filled = int((stats['memory_percent'] / 100) * width)
+        bar = '█' * filled + '░' * (width - filled)
+        return f"[{bar}] {stats['memory_used_gb']:.1f}/{stats['memory_total_gb']:.1f}GB ({stats['memory_percent']:.1f}%) | Util: {stats['utilization']}%"
+    
+    def log_status(self, message: str):
+        """Log GPU status with memory information."""
+        memory_bar = self.format_memory_bar()
+        print(f"🎮 [GPU {self.gpu_id}] {message}")
+        print(f"   {memory_bar}")
+
+
+def get_available_gpus() -> List[int]:
+    """Get list of available GPU indices."""
+    if not torch.cuda.is_available():
+        return []
+    
+    # Check CUDA_VISIBLE_DEVICES
+    visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+    if visible:
+        return list(range(len(visible.split(','))))
+    
+    return list(range(torch.cuda.device_count()))
 
 
 def setup_device():
@@ -367,6 +456,159 @@ def save_results(results: List[Dict[str, Any]], output_path: Path):
     print(f"✅ Results saved")
 
 
+# ============================================================================
+# MULTI-GPU WORKER
+# ============================================================================
+
+def gpu_worker(
+    gpu_id: int,
+    video_assignments: List[Tuple[str, Dict]],
+    descriptions_by_video: Dict[str, List[Dict]],
+    output_dir: Path,
+    model_name: str,
+    max_turns: Optional[int],
+    use_concat: bool,
+    skip_existing: bool,
+    result_queue: mp.Queue
+):
+    """Worker function that runs on a specific GPU.
+    
+    Args:
+        gpu_id: GPU index to use
+        video_assignments: List of (video_id, video_data) tuples
+        descriptions_by_video: Dict mapping video_id to AU descriptions
+        output_dir: Output directory
+        model_name: Gemma model name
+        max_turns: Max turns per video
+        use_concat: If True, use simple concatenation
+        skip_existing: If True, skip videos with existing outputs
+        result_queue: Queue to send results back
+    """
+    try:
+        # Set device for this worker
+        device = f"cuda:{gpu_id}"
+        torch.cuda.set_device(gpu_id)
+        
+        print(f"\n🚀 [GPU {gpu_id}] Worker starting with {len(video_assignments)} videos")
+        
+        # Initialize GPU monitor
+        monitor = GPUMonitor(gpu_id)
+        monitor.log_status("Worker starting")
+        
+        # Load model on this GPU
+        if not use_concat:
+            print(f"🔧 [GPU {gpu_id}] Loading {model_name}...")
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16,
+                device_map=device
+            )
+            model.eval()
+            monitor.log_status("Model loaded")
+        else:
+            tokenizer = None
+            model = None
+            print(f"⚡ [GPU {gpu_id}] Using concat mode - no model loaded")
+        
+        # Process assigned videos
+        worker_results = []
+        total_turns_processed = 0
+        
+        for video_idx, (video_id, video_data) in enumerate(video_assignments):
+            print(f"\n{'='*60}")
+            print(f"[GPU {gpu_id}] Video {video_idx + 1}/{len(video_assignments)}: {video_id}")
+            print(f"{'='*60}")
+            
+            # Check if output already exists
+            output_file = output_dir / f"{video_id}_combined.json"
+            if skip_existing and output_file.exists():
+                print(f"[GPU {gpu_id}] ⏭️  Skipping {video_id} - output already exists")
+                continue
+            
+            # Check if we have descriptions for this video
+            if video_id not in descriptions_by_video:
+                print(f"[GPU {gpu_id}] ⚠️ No AU descriptions for {video_id}, skipping")
+                continue
+            
+            results = process_video(
+                video_id,
+                video_data,
+                descriptions_by_video[video_id],
+                tokenizer,
+                model,
+                device,
+                max_turns=max_turns,
+                use_concat=use_concat
+            )
+            
+            # Save immediately after each video
+            if results:
+                save_results(results, output_file)
+                worker_results.append({
+                    'video_id': video_id,
+                    'num_turns': len(results),
+                    'output_path': str(output_file)
+                })
+                total_turns_processed += len(results)
+            
+            # Log GPU stats periodically
+            if (video_idx + 1) % 3 == 0 or video_idx == len(video_assignments) - 1:
+                monitor.log_status(f"Progress: {video_idx + 1}/{len(video_assignments)} videos")
+        
+        # Clean up
+        if model is not None:
+            del model
+            del tokenizer
+        torch.cuda.empty_cache()
+        
+        # Send results back
+        result_queue.put({
+            'gpu_id': gpu_id,
+            'status': 'success',
+            'results': worker_results,
+            'total_turns': total_turns_processed
+        })
+        
+        print(f"\n✅ [GPU {gpu_id}] Worker completed: {total_turns_processed} turns across {len(worker_results)} videos")
+        
+    except Exception as e:
+        import traceback
+        error_msg = traceback.format_exc()
+        print(f"\n❌ [GPU {gpu_id}] Worker failed: {e}")
+        print(error_msg)
+        result_queue.put({
+            'gpu_id': gpu_id,
+            'status': 'error',
+            'error': str(e),
+            'traceback': error_msg
+        })
+
+
+def distribute_videos(
+    video_ids: List[str],
+    data_model: Dict,
+    num_gpus: int
+) -> Dict[int, List[Tuple[str, Dict]]]:
+    """Distribute videos across GPUs using round-robin assignment.
+    
+    Returns:
+        Dict mapping gpu_id -> list of (video_id, video_data) tuples
+    """
+    assignments = {gpu_id: [] for gpu_id in range(num_gpus)}
+    
+    for idx, video_id in enumerate(video_ids):
+        gpu_id = idx % num_gpus
+        assignments[gpu_id].append((video_id, data_model[video_id]))
+    
+    # Log distribution
+    print("\n📋 Video distribution across GPUs:")
+    for gpu_id, videos in assignments.items():
+        print(f"  GPU {gpu_id}: {len(videos)} videos")
+    
+    return assignments
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Combine time-series descriptions with transcript summaries using Gemma 7B-it"
@@ -417,8 +659,31 @@ def main():
         action="store_true",
         help="Skip videos that already have output JSON files"
     )
+    parser.add_argument(
+        "--gpus",
+        type=str,
+        default="0,1,2,3",
+        help="Comma-separated GPU indices to use (e.g., '0,1,2,3' for 4 A100s). Default: 0,1,2,3"
+    )
+    parser.add_argument(
+        "--single_gpu",
+        action="store_true",
+        help="Force single-GPU mode (no multiprocessing)"
+    )
     
     args = parser.parse_args()
+    
+    # Determine GPUs to use
+    if args.gpus:
+        gpu_ids = [int(x.strip()) for x in args.gpus.split(',')]
+    else:
+        gpu_ids = get_available_gpus()
+    
+    if not gpu_ids and not args.concat:
+        print("❌ No GPUs available! Use --concat for CPU-only mode")
+        sys.exit(1)
+    
+    num_gpus = len(gpu_ids) if not args.single_gpu else min(1, len(gpu_ids))
     
     print("🚀 Starting time-series description + summary combination" + (" (concat mode)" if args.concat else " with Gemma 7B-it"))
     print("=" * 80)
@@ -426,14 +691,15 @@ def main():
     print(f"  Data model: {args.data_model}")
     print(f"  Time-series descriptions dir: {args.descriptions_dir}")
     print(f"  Output dir: {args.output_dir}")
-    print(f"  Mode: {'String concatenation' if args.concat else f'LLM ({args.model_name})'}")
+    print(f"  Mode: {'String concatenation' if args.concat else f'LLM ({args.model_name})'}")  
+    print(f"  GPUs: {gpu_ids if gpu_ids else 'CPU only'}")
+    print(f"  Multi-GPU mode: {'No (single-GPU)' if args.single_gpu or num_gpus <= 1 else f'Yes ({num_gpus} GPUs)'}")
     print(f"  Skip existing: {args.skip_existing}")
     if args.max_turns:
         print(f"  Max turns per video: {args.max_turns} (debugging mode)")
     print()
     
     # Setup
-    device = setup_device() if not args.concat else "cpu"
     args.output_dir.mkdir(parents=True, exist_ok=True)
     
     # Load data
@@ -446,75 +712,152 @@ def main():
     
     print(f"\n📊 Processing {len(video_ids)} videos")
     
-    # Load Gemma model (skip if using concatenation)
-    if args.concat:
-        print("\n⚡ Using simple concatenation mode - skipping model load")
-        tokenizer = None
-        model = None
-    else:
-        print(f"\n🔧 Loading {args.model_name}...")
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            device_map="auto" if device == "cuda" else None,
-            low_cpu_mem_usage=True
-        )
+    # =========================================================================
+    # SINGLE-GPU MODE (or concat mode)
+    # =========================================================================
+    if args.single_gpu or num_gpus <= 1 or args.concat:
+        device = f"cuda:{gpu_ids[0]}" if gpu_ids and not args.concat else "cpu"
+        print(f"\n🔧 Using device: {device}")
         
-        if device == "cpu":
-            model = model.to(device)
+        if gpu_ids and not args.concat:
+            torch.cuda.set_device(gpu_ids[0])
         
-        print(f"✅ Model loaded on {device}")
-        if device == "cuda":
-            print(f"   GPU Memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-    
-    # Process all videos
-    all_results = []
-    processed_count = 0
-    skipped_count = 0
-    
-    for video_idx, video_id in enumerate(video_ids):
-        print(f"\n{'='*80}")
-        print(f"Video {video_idx + 1}/{len(video_ids)}: {video_id}")
-        print(f"{'='*80}")
-        
-        # Check if output already exists
-        output_file = args.output_dir / f"{video_id}_combined.json"
-        if args.skip_existing and output_file.exists():
-            print(f"⏭️  Skipping {video_id} - output already exists")
-            skipped_count += 1
-            continue
-        
-        # Check if we have time-series descriptions for this video
-        if video_id not in descriptions_by_video:
-            print(f"⚠️ No time-series descriptions found for {video_id}, skipping")
-            continue
-        
-        video_data = data_model[video_id]
-        
-        results = process_video(
-            video_id,
-            video_data,
-            descriptions_by_video[video_id],
-            tokenizer,
-            model,
-            device,
-            max_turns=args.max_turns,
-            use_concat=args.concat
-        )
-        
-        if results:
-            all_results.extend(results)
-            processed_count += 1
+        # Load Gemma model (skip if using concatenation)
+        if args.concat:
+            print("\n⚡ Using simple concatenation mode - skipping model load")
+            tokenizer = None
+            model = None
+        else:
+            print(f"\n🔧 Loading {args.model_name}...")
+            tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name,
+                torch_dtype=torch.float16 if device != "cpu" else torch.float32,
+                device_map=device if device != "cpu" else None,
+                low_cpu_mem_usage=True
+            )
+            model.eval()
             
-            # Save per video
-            save_results(results, output_file)
+            print(f"✅ Model loaded on {device}")
+            if device != "cpu":
+                print(f"   GPU Memory allocated: {torch.cuda.memory_allocated(gpu_ids[0]) / 1024**3:.2f} GB")
+        
+        # Process all videos
+        all_results = []
+        processed_count = 0
+        skipped_count = 0
+        
+        for video_idx, video_id in enumerate(video_ids):
+            print(f"\n{'='*80}")
+            print(f"Video {video_idx + 1}/{len(video_ids)}: {video_id}")
+            print(f"{'='*80}")
+            
+            # Check if output already exists
+            output_file = args.output_dir / f"{video_id}_combined.json"
+            if args.skip_existing and output_file.exists():
+                print(f"⏭️  Skipping {video_id} - output already exists")
+                skipped_count += 1
+                continue
+            
+            # Check if we have time-series descriptions for this video
+            if video_id not in descriptions_by_video:
+                print(f"⚠️ No time-series descriptions found for {video_id}, skipping")
+                continue
+            
+            video_data = data_model[video_id]
+            
+            results = process_video(
+                video_id,
+                video_data,
+                descriptions_by_video[video_id],
+                tokenizer,
+                model,
+                device,
+                max_turns=args.max_turns,
+                use_concat=args.concat
+            )
+            
+            if results:
+                all_results.extend(results)
+                processed_count += 1
+                
+                # Save per video
+                save_results(results, output_file)
+        
+        print(f"\n✅ Complete! Combined {len(all_results)} turns across {processed_count} videos")
+        if skipped_count > 0:
+            print(f"⏭️  Skipped {skipped_count} videos (already processed)")
+        print(f"📁 Results saved to: {args.output_dir}")
     
-    print(f"\n✅ Complete! Combined {len(all_results)} turns across {processed_count} videos")
-    if skipped_count > 0:
-        print(f"⏭️  Skipped {skipped_count} videos (already processed)")
-    print(f"📁 Results saved to: {args.output_dir}")
-
-
+    # =========================================================================
+    # MULTI-GPU MODE
+    # =========================================================================
+    else:
+        print(f"\n🚀 Launching {num_gpus} GPU workers...")
+        
+        # Set multiprocessing start method
+        try:
+            mp.set_start_method('spawn', force=True)
+        except RuntimeError:
+            pass  # Already set
+        
+        # Distribute videos across GPUs
+        video_assignments = distribute_videos(video_ids, data_model, num_gpus)
+        
+        # Create result queue
+        result_queue = mp.Queue()
+        
+        # Launch worker processes
+        processes = []
+        for gpu_id in gpu_ids[:num_gpus]:
+            p = mp.Process(
+                target=gpu_worker,
+                args=(
+                    gpu_id,
+                    video_assignments[gpu_id],
+                    descriptions_by_video,
+                    args.output_dir,
+                    args.model_name,
+                    args.max_turns,
+                    args.concat,
+                    args.skip_existing,
+                    result_queue
+                )
+            )
+            p.start()
+            processes.append(p)
+            print(f"  Started worker on GPU {gpu_id} (PID: {p.pid})")
+        
+        # Wait for all workers to complete
+        print(f"\n⏳ Waiting for {len(processes)} workers to complete...")
+        
+        # Collect results from queue
+        all_worker_results = []
+        for _ in range(len(processes)):
+            result = result_queue.get()
+            all_worker_results.append(result)
+            if result['status'] == 'success':
+                print(f"  ✅ GPU {result['gpu_id']} completed: {result['total_turns']} turns")
+            else:
+                print(f"  ❌ GPU {result['gpu_id']} failed: {result['error']}")
+        
+        # Wait for processes to terminate
+        for p in processes:
+            p.join()
+        
+        # Summary
+        total_turns = sum(r.get('total_turns', 0) for r in all_worker_results if r['status'] == 'success')
+        total_videos = sum(len(r.get('results', [])) for r in all_worker_results if r['status'] == 'success')
+        failed_gpus = [r['gpu_id'] for r in all_worker_results if r['status'] == 'error']
+        
+        print(f"\n{'='*80}")
+        print("🎉 MULTI-GPU PROCESSING COMPLETE")
+        print(f"{'='*80}")
+        print(f"  Total videos processed: {total_videos}")
+        print(f"  Total turns processed: {total_turns}")
+        print(f"  GPUs used: {num_gpus}")
+        if failed_gpus:
+            print(f"  ⚠️ Failed GPUs: {failed_gpus}")
+        print(f"  📁 Results saved to: {args.output_dir}")
 if __name__ == "__main__":
     main()
