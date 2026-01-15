@@ -1127,12 +1127,17 @@ class CurriculumTrainer:
         batch_size: int = None,
         eval_only: bool = False,
         sampler=None,
+        dataset_kwargs: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """Generic training function for any stage."""
         epoch = None
         # Use provided batch_size or default to global BATCH_SIZE
         if batch_size is None:
             batch_size = BATCH_SIZE
+        
+        # Initialize dataset_kwargs if not provided
+        if dataset_kwargs is None:
+            dataset_kwargs = {}
 
         if self.rank == 0:
             print(f"\n🚀 Starting {stage_name} Training with {self.model_type}")
@@ -1234,7 +1239,7 @@ class CurriculumTrainer:
                 train_loader = self._merge_data_loaders(
                     [
                         dataset_class(
-                            "train", EOS_TOKEN=self._get_model().get_eos_token()
+                            "train", EOS_TOKEN=self._get_model().get_eos_token(), **dataset_kwargs
                         )
                     ],
                     shuffle=True,
@@ -1244,7 +1249,7 @@ class CurriculumTrainer:
                 )
             else:
                 train_dataset = dataset_class(
-                    "train", EOS_TOKEN=self._get_model().get_eos_token()
+                    "train", EOS_TOKEN=self._get_model().get_eos_token(), **dataset_kwargs
                 )
                 train_loader = DataLoader(
                     train_dataset,
@@ -1255,7 +1260,7 @@ class CurriculumTrainer:
                 )
         else:
             train_loader = self._merge_data_loaders(
-                [dataset_class("train", EOS_TOKEN=self._get_model().get_eos_token())],
+                [dataset_class("train", EOS_TOKEN=self._get_model().get_eos_token(), **dataset_kwargs)],
                 shuffle=True,
                 batch_size=batch_size,
                 patch_size=PATCH_SIZE,
@@ -1263,7 +1268,7 @@ class CurriculumTrainer:
             )
 
         val_loader = self._merge_data_loaders(
-            [dataset_class("validation", EOS_TOKEN=self._get_model().get_eos_token())],
+            [dataset_class("validation", EOS_TOKEN=self._get_model().get_eos_token(), **dataset_kwargs)],
             shuffle=False,
             batch_size=1,
             patch_size=PATCH_SIZE,
@@ -1271,7 +1276,7 @@ class CurriculumTrainer:
         )
 
         test_loader = self._merge_data_loaders(
-            [dataset_class("test", EOS_TOKEN=self._get_model().get_eos_token())],
+            [dataset_class("test", EOS_TOKEN=self._get_model().get_eos_token(), **dataset_kwargs)],
             shuffle=False,
             batch_size=1,
             patch_size=PATCH_SIZE,
