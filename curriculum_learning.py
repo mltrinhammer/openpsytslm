@@ -73,6 +73,122 @@ from model_config import (
 )
 
 
+# GPU and Memory Monitoring Utilities
+class GPUMemoryMonitor:
+    """Monitor GPU memory usage and system memory."""
+    
+    def __init__(self, device="cuda", rank=0):
+        self.device = device
+        self.rank = rank
+        self.has_gpu = torch.cuda.is_available()
+        
+        if self.has_gpu:
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                self.nvml_available = True
+                self.handle = pynvml.nvmlDeviceGetHandleByIndex(rank) if rank < torch.cuda.device_count() else None
+            except:
+                self.nvml_available = False
+                self.handle = None
+    
+    def get_gpu_memory_info(self):
+        """Get detailed GPU memory information."""
+        if not self.has_gpu:
+            return {}
+        
+        info = {}
+        try:
+            # PyTorch memory stats
+            info['allocated_gb'] = torch.cuda.memory_allocated(self.device) / 1024**3
+            info['reserved_gb'] = torch.cuda.memory_reserved(self.device) / 1024**3
+            info['max_allocated_gb'] = torch.cuda.max_memory_allocated(self.device) / 1024**3
+            info['max_reserved_gb'] = torch.cuda.max_memory_reserved(self.device) / 1024**3
+            
+            # NVML stats (more accurate)
+            if self.nvml_available and self.handle:
+                import pynvml
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.handle)
+                util_info = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
+                temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
+                
+                info['total_gb'] = mem_info.total / 1024**3
+                info['used_gb'] = mem_info.used / 1024**3
+                info['free_gb'] = mem_info.free / 1024**3
+                info['utilization_pct'] = util_info.gpu
+                info['memory_utilization_pct'] = util_info.memory
+                info['temperature_c'] = temp
+        except Exception as e:
+            info['error'] = str(e)
+        
+        return info
+    
+    def get_system_memory_info(self):
+        """Get system RAM information."""
+        import psutil
+        mem = psutil.virtual_memory()
+        return {
+            'total_gb': mem.total / 1024**3,
+            'available_gb': mem.available / 1024**3,
+            'used_gb': mem.used / 1024**3,
+            'percent': mem.percent
+        }
+    
+    def print_memory_summary(self, prefix=""):
+        """Print a formatted memory summary."""
+        if self.rank != 0:
+            return
+        
+        print(f"\n{prefix}Memory Status:")
+        print("=" * 60)
+        
+        # GPU Memory
+        if self.has_gpu:
+            gpu_info = self.get_gpu_memory_info()
+            print(f"🎮 GPU {self.rank} Memory:")
+            if 'allocated_gb' in gpu_info:
+                print(f"   Allocated:     {gpu_info['allocated_gb']:6.2f} GB")
+                print(f"   Reserved:      {gpu_info['reserved_gb']:6.2f} GB")
+                print(f"   Peak Allocated:{gpu_info['max_allocated_gb']:6.2f} GB")
+                print(f"   Peak Reserved: {gpu_info['max_reserved_gb']:6.2f} GB")
+            
+            if 'total_gb' in gpu_info:
+                print(f"   Total VRAM:    {gpu_info['total_gb']:6.2f} GB")
+                print(f"   Used VRAM:     {gpu_info['used_gb']:6.2f} GB ({gpu_info['used_gb']/gpu_info['total_gb']*100:.1f}%)")
+                print(f"   Free VRAM:     {gpu_info['free_gb']:6.2f} GB")
+            
+            if 'utilization_pct' in gpu_info:
+                print(f"   GPU Util:      {gpu_info['utilization_pct']:6.1f}%")
+                print(f"   Memory Util:   {gpu_info['memory_utilization_pct']:6.1f}%")
+                print(f"   Temperature:   {gpu_info['temperature_c']:6.1f}°C")
+        
+        # System Memory
+        try:
+            sys_info = self.get_system_memory_info()
+            print(f"\n💻 System RAM:")
+            print(f"   Total:         {sys_info['total_gb']:6.2f} GB")
+            print(f"   Used:          {sys_info['used_gb']:6.2f} GB ({sys_info['percent']:.1f}%)")
+            print(f"   Available:     {sys_info['available_gb']:6.2f} GB")
+        except:
+            pass
+        
+        print("=" * 60)
+    
+    def reset_peak_stats(self):
+        """Reset peak memory statistics."""
+        if self.has_gpu:
+            torch.cuda.reset_peak_memory_stats(self.device)
+    
+    def cleanup(self):
+        """Cleanup NVML."""
+        if self.nvml_available:
+            try:
+                import pynvml
+                pynvml.nvmlShutdown()
+            except:
+                pass
+
+
 # Global stage configuration - users can modify this to mix and match stages
 CURRICULUM_STAGES = [
     "stage1_mcq",
@@ -1034,6 +1150,12 @@ class CurriculumTrainer:
             if self.world_size > 1:
                 print(f"   Effective batch size: {batch_size * self.world_size}")
             print()
+        
+        # Initialize GPU memory monitor for stage 6
+        gpu_monitor = None
+        if stage_name == "stage6_psychotherapy_cot" and self.rank == 0:
+            gpu_monitor = GPUMemoryMonitor(device=self.device, rank=self.rank)
+            gpu_monitor.print_memory_summary("🔧 Initial ")
 
         # Check if checkpoint exists when in eval_only mode
         if eval_only and not self._checkpoint_exists(stage_name):
@@ -1194,6 +1316,11 @@ class CurriculumTrainer:
             # Training loop
             epochs_no_improve = 0
             start_epoch = best_epoch + 1 if best_epoch is not None else 1
+            
+            # Reset peak memory stats before training for stage 6
+            if stage_name == "stage6_psychotherapy_cot" and gpu_monitor:
+                gpu_monitor.reset_peak_stats()
+            
             for epoch in range(start_epoch, num_epochs + 1):
                 # Set epoch for distributed sampler
                 if hasattr(train_loader.sampler, "set_epoch"):
@@ -1202,30 +1329,36 @@ class CurriculumTrainer:
                 # Training
                 self.model.train()
                 running_loss = 0.0
+                
+                # Log GPU stats at start of epoch for stage 6
+                if stage_name == "stage6_psychotherapy_cot" and gpu_monitor and epoch % 5 == 1:
+                    gpu_monitor.print_memory_summary(f"📊 Epoch {epoch} Start ")
+                
                 prog = tqdm(
                     train_loader,
                     desc=f"Epoch {epoch}/{num_epochs}",
                     disable=self.rank != 0,
                 )
                 for i, batch in enumerate(prog):
-                    # DEBUG PRINT: Only for the first batch of the first epoch
-                    if epoch == start_epoch and i == 0:
-                        print(f"[DEBUG] Batch {i} - batch size: {len(batch)}")
+                    # Enhanced DEBUG PRINT for stage 6
+                    if stage_name == "stage6_psychotherapy_cot" and epoch == start_epoch and i == 0 and self.rank == 0:
+                        print(f"\n{'='*60}")
+                        print(f"🔍 Stage 6 First Batch Debug Info:")
+                        print(f"{'='*60}")
+                        print(f"Batch size: {len(batch)}")
                         if isinstance(batch, list) and isinstance(batch[0], dict):
                             for k, v in batch[0].items():
                                 if hasattr(v, "shape"):
-                                    print(f"[DEBUG] Sample key '{k}' shape: {v.shape}")
+                                    print(f"  Sample key '{k}' shape: {v.shape}")
                                 elif isinstance(v, list):
-                                    print(
-                                        f"[DEBUG] Sample key '{k}' list length: {len(v)}"
-                                    )
-                        import torch
-
-                        print(
-                            torch.cuda.memory_summary()
-                            if torch.cuda.is_available()
-                            else "No CUDA"
-                        )
+                                    print(f"  Sample key '{k}' list length: {len(v)}")
+                                    if len(v) > 0 and hasattr(v[0], "shape"):
+                                        print(f"    First element shape: {v[0].shape}")
+                        
+                        if gpu_monitor:
+                            gpu_monitor.print_memory_summary("🔍 Before First Forward Pass ")
+                        print(f"{'='*60}\n")
+                    
                     optimizer.zero_grad()
                     loss = self._get_model().compute_loss(batch)
                     loss.backward()
@@ -1242,6 +1375,10 @@ class CurriculumTrainer:
                             loss=f"{loss.item():.4f}",
                             lr=f"{scheduler.get_last_lr()[0]:.2e}",
                         )
+                    
+                    # Log GPU stats for first batch after forward pass for stage 6
+                    if stage_name == "stage6_psychotherapy_cot" and epoch == start_epoch and i == 0 and gpu_monitor:
+                        gpu_monitor.print_memory_summary("🔍 After First Backward Pass ")
 
                 avg_train_loss = running_loss / len(train_loader)
                 if self.rank == 0:
@@ -1269,6 +1406,10 @@ class CurriculumTrainer:
                 if self.rank == 0:
                     tqdm.write(f"Epoch {epoch} — val   loss: {avg_val_loss:.4f}")
                     tqdm.write(f"Epoch {epoch} — best  loss: {best_val_loss:.4f}")
+                
+                # Log GPU memory at end of epoch for stage 6
+                if stage_name == "stage6_psychotherapy_cot" and gpu_monitor and epoch % 5 == 0:
+                    gpu_monitor.print_memory_summary(f"📊 Epoch {epoch} End ")
 
                 # Save loss history for this epoch
                 self._save_loss_history(stage_name, epoch, avg_train_loss, avg_val_loss)
@@ -1337,10 +1478,26 @@ class CurriculumTrainer:
                 print(f"   Total epochs run: {epoch}")
                 print(f"   Best validation loss: {best_val_loss:.4f}")
                 print(f"   Epochs without improvement: {epochs_no_improve}")
+            
+            # Final memory summary for stage 6
+            if stage_name == "stage6_psychotherapy_cot" and gpu_monitor:
+                gpu_monitor.print_memory_summary("🏁 Training Complete ")
+
+        # Log memory before evaluation for stage 6
+        if stage_name == "stage6_psychotherapy_cot" and gpu_monitor and self.rank == 0:
+            print("\n" + "="*60)
+            print("Starting Evaluation on Test Set")
+            print("="*60)
+            gpu_monitor.print_memory_summary("📊 Pre-Evaluation ")
 
         metrics = self._evaluate_stage(
             stage_name, test_loader, stage_name, metric_func, best_epoch
         )
+        
+        # Log memory after evaluation for stage 6
+        if stage_name == "stage6_psychotherapy_cot" and gpu_monitor and self.rank == 0:
+            gpu_monitor.print_memory_summary("✅ Post-Evaluation ")
+            gpu_monitor.cleanup()
 
         return metrics
 
