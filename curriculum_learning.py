@@ -798,11 +798,13 @@ class CurriculumTrainer:
             )
             if not os.path.exists(metrics_file):
                 # PATCH: If running stage2_captioning and previous stage metrics are missing, skip loading
-                if current_stage == "stage2_captioning":
+                if current_stage in ["stage2_captioning", "stage6_psychotherapy_cot"]:
                     if self.rank == 0:
                         print(
                             f"⚠️  Skipping previous stage {previous_stage} because metrics file not found: {metrics_file}"
                         )
+                    if current_stage == "stage6_psychotherapy_cot":
+                        print(f"    Assuming pre_Trained model from Huggingface already includes stage5 training")
                     return None
                 raise RuntimeError(
                     f"Previous stage {previous_stage} metrics file not found: {metrics_file}"
@@ -1187,13 +1189,16 @@ class CurriculumTrainer:
                             print(f"   {metric}: {value}")
                     print()
             else:
-                # Only allow fresh model for first stage
-                if stage_name != CURRICULUM_STAGES[0]:
+                # Only allow fresh model for first stage or stages with pre-trained checkpoints
+                if stage_name not in [CURRICULUM_STAGES[0], "stage6_psychotherapy_cot"]:
                     raise RuntimeError(
                         f"Cannot start {stage_name} with fresh model. Previous stage {CURRICULUM_STAGES[CURRICULUM_STAGES.index(stage_name) - 1]} must be completed first."
                     )
                 if self.rank == 0:
-                    print("🆕 Starting with fresh model (first stage)")
+                    if stage_name == "stage6_psychotherapy_cot":
+                        print("🤗 Starting stage6 with HuggingFace pre-trained model")
+                    else:
+                        print("🆕 Starting with fresh model (first stage)")
                     print()
         except Exception as e:
             if self.rank == 0:
