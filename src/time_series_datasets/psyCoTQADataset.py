@@ -173,25 +173,35 @@ Description: """
         # Create tensor from padded signals
         series = torch.tensor(padded_signals, dtype=torch.float32)
         
-        # Check for invalid data before normalization
-        if torch.isnan(series).any() or torch.isinf(series).any():
+        # Handle NaN values (from failed face detection frames) by filling with 0
+        if torch.isnan(series).any():
+            nan_count = torch.isnan(series).sum().item()
+            print(f"⚠️  Filling {nan_count} NaN values with 0 in sample from {row.get('video_id', 'unknown')}")
+            series = torch.nan_to_num(series, nan=0.0)
+        
+        # Check for infinity values (still invalid)
+        if torch.isinf(series).any():
             print(f"❌ Invalid data detected in Psychotherapy CoT sample")
             print(f"Row keys: {row.keys()}")
             print(f"Series shape: {series.shape}")
-            print(f"NaN positions: {torch.isnan(series).nonzero()}")
             print(f"Inf positions: {torch.isinf(series).nonzero()}")
-            raise ValueError("Invalid data detected")
+            raise ValueError("Invalid data detected: contains Inf values")
         
-        # Normalize the tensor using torch operations (matching HAR CoT approach)
-        means_tensor = torch.tensor(all_means, dtype=torch.float32).unsqueeze(1)
-        stds_tensor = torch.tensor(all_stds, dtype=torch.float32).unsqueeze(1)
+        # Recalculate mean and std from the cleaned signal (matching ECG-QA approach)
+        # This ensures we use clean statistics after NaN handling
+        means_tensor = series.mean(dim=1, keepdim=True)
+        stds_tensor = series.std(dim=1, keepdim=True)
         
-        # Clamp stds to avoid division by zero (matching HAR CoT)
-        min_std = 1e-8
+        # Clamp stds to avoid division by zero (matching ECG-QA and HAR CoT)
+        min_std = 1e-6
         stds_tensor = torch.clamp(stds_tensor, min=min_std)
         
         # Normalize: (x - mean) / std
         series_norm = (series - means_tensor) / stds_tensor
+        
+        # Convert means/stds back to lists for prompt text
+        all_means = means_tensor.squeeze(1).tolist()
+        all_stds = stds_tensor.squeeze(1).tolist()
         
         # Check for invalid data after normalization
         if torch.isnan(series_norm).any() or torch.isinf(series_norm).any():
@@ -199,7 +209,6 @@ Description: """
             print(f"Original series shape: {series.shape}")
             print(f"Means: {means_tensor.squeeze()}")
             print(f"Stds: {stds_tensor.squeeze()}")
-            print(f"Normalized series: {series_norm}")
             print(f"NaN positions: {torch.isnan(series_norm).nonzero()}")
             print(f"Inf positions: {torch.isinf(series_norm).nonzero()}")
             raise ValueError("NaN/Inf detected after normalization")

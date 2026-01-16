@@ -269,8 +269,14 @@ def _extract_single_window(
             missing_cols = set(feature_columns) - set(au_cols)
             print(f"[warn] Missing columns for {video_id}: {missing_cols}")
     else:
-        # Default: all AU regression columns
-        au_cols = [c for c in speaker_1_df.columns if 'AU' in c and '_r' in c]
+        # Default: use only AU_03, AU_04, AU_05, AU_06 (stable columns without NaN issues)
+        default_aus = ['AU_03', 'AU_04', 'AU_05', 'AU_06']
+        au_cols = [c for c in default_aus if c in speaker_1_df.columns and c in speaker_2_df.columns]
+        
+        # Fallback to _r suffix format if AU_ format not found
+        if not au_cols:
+            default_aus_r = ['AU03_r', 'AU04_r', 'AU05_r', 'AU06_r']
+            au_cols = [c for c in default_aus_r if c in speaker_1_df.columns and c in speaker_2_df.columns]
     
     if not au_cols:
         print(f"[warn] No AU columns found for {video_id}")
