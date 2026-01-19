@@ -25,15 +25,15 @@ from time_series_datasets.util import (
     extend_time_series_to_match_patch_size_and_aggregate,
 )
 
-# Import psychotherapy dataset using importlib to avoid namespace collision
+# Import dyadic dataset using importlib to avoid namespace collision
 import importlib.util
-_psy_spec = importlib.util.spec_from_file_location(
-    "psyCoTQADataset",
-    os.path.join(os.path.dirname(__file__), "src", "time_series_datasets", "psyCoTQADataset.py")
+_dyadic_spec = importlib.util.spec_from_file_location(
+    "dyadicCoTQADataset",
+    os.path.join(os.path.dirname(__file__), "src", "time_series_datasets", "dyadicCoTQADataset.py")
 )
-_psy_module = importlib.util.module_from_spec(_psy_spec)
-_psy_spec.loader.exec_module(_psy_module)
-PsychotherapyCoTQADataset = _psy_module.PsychotherapyCoTQADataset
+_dyadic_module = importlib.util.module_from_spec(_dyadic_spec)
+_dyadic_spec.loader.exec_module(_dyadic_module)
+DyadicCoTQADataset = _dyadic_module.DyadicCoTQADataset
 import torch
 import torch.distributed as dist
 from torch.optim import AdamW
@@ -977,8 +977,12 @@ class CurriculumTrainer:
                     test_loader, desc=f"Evaluating {stage_name}", disable=self.rank != 0
                 ):
                     # Generate predictions with higher max_tokens (skip separate loss computation)
+                    # Add repetition_penalty and no_repeat_ngram_size to prevent repetitive output
                     predictions = self._get_model().generate(
-                        batch, max_new_tokens=max_new_tokens
+                        batch,
+                        max_new_tokens=max_new_tokens,
+                        repetition_penalty=1.2,
+                        no_repeat_ngram_size=3,
                     )
 
                     # Collect results
@@ -1003,6 +1007,19 @@ class CurriculumTrainer:
                                 result["ecg_id"] = sample["ecg_id"]
                             if "correct_answer" in sample:
                                 result["correct_answer"] = sample["correct_answer"]
+
+                        # Add metadata for stage6_psychotherapy_cot
+                        if stage == "stage6_psychotherapy_cot":
+                            if "video_id" in sample:
+                                result["video_id"] = sample["video_id"]
+                            if "turn_index" in sample:
+                                result["turn_index"] = sample["turn_index"]
+                            if "speaker_id" in sample:
+                                result["speaker_id"] = sample["speaker_id"]
+                            if "window_start" in sample:
+                                result["window_start"] = sample["window_start"]
+                            if "window_end" in sample:
+                                result["window_end"] = sample["window_end"]
 
                         results.append(result)
                         # Stream write each result immediately to per-rank file
@@ -1731,7 +1748,7 @@ class CurriculumTrainer:
 
         return self._train_stage(
             stage_name="stage6_psychotherapy_cot",
-            dataset_class=PsychotherapyCoTQADataset,
+            dataset_class=DyadicCoTQADataset,
             num_epochs=60,
             lr_encoder=2e-4,
             lr_projector=1e-4,

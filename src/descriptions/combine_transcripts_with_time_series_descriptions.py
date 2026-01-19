@@ -250,8 +250,8 @@ def create_combination_prompt(
     """Create prompt for Gemma to combine time-series description and summary."""
     
     prompt = f"""
-You are describing the content in a speech turn from a psychotherapy session. 
-Your task is to combine what was said with the client and therapist's facial expressions to one short, coherent paragraph.
+You are describing the content in a speech turn from a dyadic interaction. 
+Your task is to combine what was said with the speakers' facial expressions to one short, coherent paragraph.
 
 Data for this turn:
 

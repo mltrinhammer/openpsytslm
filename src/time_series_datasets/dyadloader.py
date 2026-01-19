@@ -19,7 +19,7 @@ import hashlib
 import pickle
 
 
-def load_psychotherapy_cot_splits(
+def load_dyadic_cot_splits(
     data_model_path: str,
     combined_dir: str,
     train_videos: List[str] = None,
@@ -64,15 +64,21 @@ def load_psychotherapy_cot_splits(
     # Get all video IDs
     all_video_ids = list(data_model.keys())
     
-    # Create default splits if not provided (70/15/15)
+    # Create default splits if not provided (80/15/5)
+    # Split is done at VIDEO level - all turns from a video stay in the same split
     if train_videos is None and val_videos is None and test_videos is None:
         n_total = len(all_video_ids)
-        n_train = int(0.7 * n_total)
+        n_train = int(0.80 * n_total)
         n_val = int(0.15 * n_total)
+        # Ensure at least 1 video in test set
+        n_test = max(1, n_total - n_train - n_val)
+        n_val = n_total - n_train - n_test  # Adjust val if needed
         
         train_videos = all_video_ids[:n_train]
         val_videos = all_video_ids[n_train:n_train + n_val]
         test_videos = all_video_ids[n_train + n_val:]
+        
+        print(f"[dyadic_loader] Video-level split: train={len(train_videos)}, val={len(val_videos)}, test={len(test_videos)}")
     
     train_videos_set = set(train_videos or [])
     val_videos_set = set(val_videos or [])
@@ -386,7 +392,7 @@ def _extract_single_window(
 
 if __name__ == "__main__":
     # Test the loader
-    train, val, test = load_psychotherapy_cot_splits(
+    train, val, test = load_dyadic_cot_splits(
         data_model_path="data_model.yaml",
         combined_dir="results/combined/",
         max_samples=5

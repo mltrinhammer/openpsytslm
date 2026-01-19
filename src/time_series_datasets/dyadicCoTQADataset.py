@@ -11,17 +11,17 @@ sys.path.append(str(Path(__file__).parent.parent.parent / "external" / "opentslm
 from prompt.text_time_series_prompt import TextTimeSeriesPrompt
 from time_series_datasets.QADataset import QADataset
 
-# Import from local psyloader
+# Import from local dyadloader
 sys.path.append(str(Path(__file__).parent))
-from psyloader import load_psychotherapy_cot_splits
+from dyadloader import load_dyadic_cot_splits
 
 
-class PsychotherapyCoTQADataset(QADataset):
+class DyadicCoTQADataset(QADataset):
     """
-    Psychotherapy CoT QA Dataset for analyzing speaker facial AU time-series.
+    Dyadic CoT QA Dataset for analyzing speaker facial AU time-series.
     
     This dataset processes synchronized facial action units (AUs) from two speakers
-    during therapy sessions. Each sample represents one speech turn with:
+    during dyadic interactions. Each sample represents one speech turn with:
     - Original transcript summary as context
     - Synchronized AU time series for both speakers
     - Combined facial description as the target answer
@@ -74,7 +74,7 @@ class PsychotherapyCoTQADataset(QADataset):
 
     def _load_splits(self) -> Tuple[List, List, List]:
         """Load train/val/test splits as plain Python lists."""
-        train_list, val_list, test_list = load_psychotherapy_cot_splits(
+        train_list, val_list, test_list = load_dyadic_cot_splits(
             data_model_path=self.data_model_path,
             combined_dir=self.combined_dir,
             train_videos=self.train_videos,
@@ -96,8 +96,8 @@ class PsychotherapyCoTQADataset(QADataset):
         original_summary = row.get("original_summary", "")
         speaker_id = row.get("speaker_id", "unknown")
         
-        prompt = f"""You are describing the content in a speech turn from a psychotherapy session. 
-Your task is to combine what was said with the client and therapist's facial expressions to one short, coherent paragraph.
+        prompt = f"""You are describing the content in a speech turn from a dyadic interaction. 
+Your task is to combine what was said with the speakers' facial expressions to one short, coherent paragraph.
 
 Speech content: {original_summary} (spoken by {speaker_id})
 
@@ -255,7 +255,7 @@ Description: """
 
 # Test the dataset
 if __name__ == "__main__":
-    dataset = PsychotherapyCoTQADataset(
+    dataset = DyadicCoTQADataset(
         split="train", 
         EOS_TOKEN=";", 
         data_model_path="data_model.yaml",
