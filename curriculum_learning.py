@@ -976,11 +976,22 @@ class CurriculumTrainer:
                 for batch in tqdm(
                     test_loader, desc=f"Evaluating {stage_name}", disable=self.rank != 0
                 ):
-                    # Generate predictions with aggressive repetition control
+                    # Generate predictions with moderate repetition control
                     predictions = self._get_model().generate(
                         batch,
                         max_new_tokens=max_new_tokens,
+                        repetition_penalty=1.2,
+                        no_repeat_ngram_size=3,
                     )
+                    
+                    # Post-process: strip repetition after "Answer:" marker
+                    # (residual pattern from ECG-QA pretraining)
+                    cleaned_predictions = []
+                    for pred in predictions:
+                        if "Answer:" in pred:
+                            pred = pred.split("Answer:")[0].strip()
+                        cleaned_predictions.append(pred)
+                    predictions = cleaned_predictions
 
                     # Collect results
                     for sample, pred in zip(batch, predictions):
