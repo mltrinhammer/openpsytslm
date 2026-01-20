@@ -942,8 +942,8 @@ class CurriculumTrainer:
         results = []
         test_loss = 0.0
 
-        # Set max_tokens for generation - gold answers are typically 500-900 chars
-        max_new_tokens = 512
+        # Set max_tokens for generation - gold answers are ~400-700 chars (~150-250 tokens)
+        max_new_tokens = 300
 
         # Prepare per-rank streaming writer for test predictions
         results_file_rank = os.path.join(
@@ -976,26 +976,22 @@ class CurriculumTrainer:
                 for batch in tqdm(
                     test_loader, desc=f"Evaluating {stage_name}", disable=self.rank != 0
                 ):
-                    # Generate predictions with strong repetition control
-                    # - repetition_penalty=1.5: Strongly penalize repeated tokens
-                    # - no_repeat_ngram_size=4: Prevent 4-gram repetitions
-                    # - do_sample=False: Greedy decoding for coherent output
+                    # Generate predictions with aggressive repetition control
                     predictions = self._get_model().generate(
                         batch,
                         max_new_tokens=max_new_tokens,
-                        repetition_penalty=1.5,
-                        no_repeat_ngram_size=4,
-                        do_sample=False,
                     )
 
                     # Collect results
                     for sample, pred in zip(batch, predictions):
+                        gold = sample["answer"]
+                        
                         result = {
                             "pre_prompt": sample["pre_prompt"],
                             "time_series_text": sample["time_series_text"],
                             "post_prompt": sample["post_prompt"],
                             "generated": pred,
-                            "gold": sample["answer"],
+                            "gold": gold,
                         }
 
                         # Add time series ID for stage2 captioning

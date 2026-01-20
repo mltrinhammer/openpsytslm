@@ -88,7 +88,8 @@ class DyadicCoTQADataset(QADataset):
         return train_list, val_list, test_list
 
     def _get_answer(self, row) -> str:
-        """Get the answer from the combined description."""
+        """Get the answer from the combined description.
+           """
         return row.get("answer", "")
 
     def _get_pre_prompt(self, row) -> str:
@@ -96,23 +97,30 @@ class DyadicCoTQADataset(QADataset):
         original_summary = row.get("original_summary", "")
         speaker_id = row.get("speaker_id", "unknown")
         
-        prompt = f"""You are describing a speech turn from a dyadic interaction between exactly two speakers: speaker 1 and speaker 2.
+        # Map speaker_1/speaker_2 to "Speaker 1"/"Speaker 2" for consistency with gold answers
+        if speaker_id == "speaker_1":
+            speaker_label = "Speaker 1"
+        elif speaker_id == "speaker_2":
+            speaker_label = "Speaker 2"
+        else:
+            speaker_label = speaker_id
 
-Speech content: {original_summary} (spoken by {speaker_id})
+        prompt = f"""You are describing a speech turn from a dyadic interaction between exactly two speakers: Speaker 1 and Speaker 2.
+
+Speech content: {original_summary} (spoken by {speaker_label})
 
 Instructions:
 - Write ONE short paragraph combining the speech content with the facial expressions.
+- ONLY refer to Speaker 1 and Speaker 2 - no other speakers exist.
 - Briefly mention the most salient facial Action Units (AUs) - do not over-analyze.
 - Do not speculate or add information not present in the data.
-- Do not use bullet points or section headings.
-- Only output your paragraph, no other information.
 
-Description: """
+"""
         return prompt
 
     def _get_post_prompt(self, row) -> str:
-        """Generate the post-prompt."""
-        return "Description: "
+        """Generate the post-prompt with answer formatting instruction."""
+        return """Description: """
 
     def _get_text_time_series_prompt_list(self, row) -> List[TextTimeSeriesPrompt]:
         """
@@ -221,7 +229,7 @@ Description: """
             std = all_stds[au_idx]
             normalized_series = series_norm[au_idx].tolist()
             
-            text_prompt = f"Facial AU activation for {au_name} (speaker 1), it has mean {mean:.4f} and std {std:.4f}:"
+            text_prompt = f"[Speaker 1 {au_name}] mean={mean:.4f}, std={std:.4f}:"
             prompts.append(TextTimeSeriesPrompt(text_prompt, normalized_series))
             au_idx += 1
         
@@ -231,7 +239,7 @@ Description: """
             std = all_stds[au_idx]
             normalized_series = series_norm[au_idx].tolist()
             
-            text_prompt = f"Facial AU activation for {au_name} (speaker 2), it has mean {mean:.4f} and std {std:.4f}:"
+            text_prompt = f"[Speaker 2 {au_name}] mean={mean:.4f}, std={std:.4f}:"
             prompts.append(TextTimeSeriesPrompt(text_prompt, normalized_series))
             au_idx += 1
         
