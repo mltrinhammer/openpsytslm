@@ -942,8 +942,8 @@ class CurriculumTrainer:
         results = []
         test_loss = 0.0
 
-        # Set higher max_tokens for generation during evaluation
-        max_new_tokens = 2000
+        # Set max_tokens for generation - gold answers are typically 500-900 chars
+        max_new_tokens = 512
 
         # Prepare per-rank streaming writer for test predictions
         results_file_rank = os.path.join(
@@ -976,13 +976,16 @@ class CurriculumTrainer:
                 for batch in tqdm(
                     test_loader, desc=f"Evaluating {stage_name}", disable=self.rank != 0
                 ):
-                    # Generate predictions with higher max_tokens (skip separate loss computation)
-                    # Add repetition_penalty and no_repeat_ngram_size to prevent repetitive output
+                    # Generate predictions with strong repetition control
+                    # - repetition_penalty=1.5: Strongly penalize repeated tokens
+                    # - no_repeat_ngram_size=4: Prevent 4-gram repetitions
+                    # - do_sample=False: Greedy decoding for coherent output
                     predictions = self._get_model().generate(
                         batch,
                         max_new_tokens=max_new_tokens,
-                        repetition_penalty=1.2,
-                        no_repeat_ngram_size=3,
+                        repetition_penalty=1.5,
+                        no_repeat_ngram_size=4,
+                        do_sample=False,
                     )
 
                     # Collect results

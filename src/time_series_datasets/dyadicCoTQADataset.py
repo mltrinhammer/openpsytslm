@@ -96,18 +96,16 @@ class DyadicCoTQADataset(QADataset):
         original_summary = row.get("original_summary", "")
         speaker_id = row.get("speaker_id", "unknown")
         
-        prompt = f"""You are describing the content in a speech turn from a dyadic interaction. 
-Your task is to combine what was said with the speakers' facial expressions to one short, coherent paragraph.
+        prompt = f"""You are describing a speech turn from a dyadic interaction between exactly two speakers: speaker 1 and speaker 2.
 
 Speech content: {original_summary} (spoken by {speaker_id})
 
 Instructions:
-- Begin by describing the speech content very briefly
-- Then briefly note any salient facial Action Units (AUs) that stand out — do not over-analyze every AU, only mention the most relevant ones.
-- Do **not** over-analyze or speculate; be very true to what is actually present in the data available. 
-- Do not reflect on the emotional bond, synchrony or similar aspects of the interaction.
-- Write your description as a single, natural paragraph — do not use bullet points, numbered steps, or section headings.
-- ONLY output your description.
+- Write ONE short paragraph combining the speech content with the facial expressions.
+- Briefly mention the most salient facial Action Units (AUs) - do not over-analyze.
+- Do not speculate or add information not present in the data.
+- Do not use bullet points or section headings.
+- Only output your paragraph, no other information.
 
 Description: """
         return prompt
