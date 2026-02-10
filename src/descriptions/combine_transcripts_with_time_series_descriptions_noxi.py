@@ -276,10 +276,11 @@ Facial Action Unit (AU) patterns: {timeseries_description}
 
 Instructions:
 - Begin by describing the speech content very briefly
-- Then briefly note any salient facial Action Units (AUs) that stand out — do not over-analyze every AU, only mention the most relevant ones.
+- Then briefly note any salient facial Action Units (AUs) that stand out for both novice and expert, while only mentioning the most relevant ones.
 - Do **not** over-analyze or speculate; be very true to what is actually present in the data available. 
 - Do not reflect on the emotional bond, synchrony or similar aspects of the interaction.
 - Write your description as a single, natural paragraph — do not use bullet points, numbered steps, or section headings.
+- ONLY output your description, do not make any introductory comments.
 
 Description:"""
 

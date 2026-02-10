@@ -185,22 +185,19 @@ class NoXiCoTQADataset(QADataset):
         facial AU analysis in dyadic interactions.
         """
         speaker = _row.get("speaker_id", "participant")
+        summary = _row.get("original_summary", "").strip()
         text = f"""
-        You are given facial Action Unit (AU) intensity time series data from a dyadic interaction (NoXi corpus).
-        The data includes AU activations for both the expert and the novice participant during a conversation segment.
-        Your task is to analyze the facial behavior patterns and describe what is happening in this interaction.
+        You are describing the content in a speech turn from a dyadic interaction. 
+    Your task is to combine what was said with the speakers' facial expressions to one short, coherent paragraph.
+    Speech content from this turn: {summary} (spoken by {speaker})
+Instructions:
+- Begin by describing the speech content very briefly
+- Then briefly note any salient facial Action Units (AUs) that stand out — do not over-analyze every AU, only mention the most relevant ones.
+- Do **not** over-analyze or speculate; be very true to what is actually present in the data available. 
+- Do not reflect on the emotional bond, synchrony or similar aspects of the interaction.
+- Write your description as a single, natural paragraph — do not use bullet points, numbered steps, or section headings.
 
-        Instructions:
-        - Begin by analyzing each AU time series without assuming a specific interpretation.
-        - Consider the temporal dynamics: are activations sustained, transient, or rhythmic?
-        - Think about co-occurrences: which AUs activate together and what facial expressions might they form?
-        - Compare the expert's and novice's AU patterns to identify interaction dynamics.
-        - Consider the context: this is a {speaker}'s turn in a dyadic conversation.
-        - Write your analysis as a single, natural paragraph — do not use bullet points, numbered steps, or section headings.
-        - Integrate your observations about the AU patterns with any apparent communicative or emotional significance.
-
-        - Make sure to end your response with a concise summary of the interaction dynamics.
-        """
+Description:"""
         return text
 
     def _get_post_prompt(self, _row) -> str:
