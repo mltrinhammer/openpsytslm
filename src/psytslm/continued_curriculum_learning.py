@@ -28,17 +28,22 @@ Usage:
 import sys
 import os
 
+# Add our own source tree
+PROJECT_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_SRC not in sys.path:
+    sys.path.insert(0, PROJECT_SRC)
+
+# Add project time_series_datasets folder directly to avoid name collision
+PROJECT_TS_DATASETS = os.path.join(PROJECT_SRC, "time_series_datasets")
+if PROJECT_TS_DATASETS not in sys.path:
+    sys.path.insert(0, PROJECT_TS_DATASETS)
+
 # Add opentslm src to path for model + prompt imports
 OPENTSLM_SRC = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "external", "opentslm", "src")
 )
 if OPENTSLM_SRC not in sys.path:
     sys.path.insert(0, OPENTSLM_SRC)
-
-# Also add our own source tree
-PROJECT_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_SRC not in sys.path:
-    sys.path.insert(0, PROJECT_SRC)
 
 import json
 import argparse
@@ -76,7 +81,7 @@ from model_config import (
 )
 
 # Our NoXi dataset
-from time_series_datasets.noxiCoTDataset import NoXiCoTQADataset
+from noxiCoTDataset import NoXiCoTQADataset
 
 
 # ============================================================================
