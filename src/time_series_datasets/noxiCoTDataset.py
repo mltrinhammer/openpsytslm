@@ -20,6 +20,14 @@ import numpy as np
 import torch
 from typing import List, Tuple, Literal
 
+# Ensure this file's own directory is on sys.path so sibling modules
+# (noxiloader, dyadloader, …) can be imported by name without a
+# package-qualified path that would collide with opentslm's
+# identically-named "time_series_datasets" package.
+_THIS_DIR = os.path.abspath(os.path.dirname(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+
 # Add the opentslm src directory to path so we can import from the original framework
 OPENTSLM_SRC = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "external", "opentslm", "src")
@@ -31,8 +39,9 @@ from datasets import Dataset as HFDataset
 from prompt.text_time_series_prompt import TextTimeSeriesPrompt
 from time_series_datasets.QADataset import QADataset
 
-# Local loader
-from time_series_datasets.noxiloader import load_noxi_cot_splits, DEFAULT_AU_COLUMNS
+# Local loader — imported by filename, NOT via the time_series_datasets
+# package, to avoid collision with opentslm's package of the same name.
+from noxiloader import load_noxi_cot_splits, DEFAULT_AU_COLUMNS
 
 
 # ============================================================================
