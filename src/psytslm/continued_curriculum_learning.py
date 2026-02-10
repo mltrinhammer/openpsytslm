@@ -2,7 +2,7 @@
 Continued Curriculum Learning for OpenTSLM on NoXi data.
 
 This script loads an already-trained OpenTSLM Flamingo model from HuggingFace
-('OpenTSLM/llama-3.2-3b-ecg-flamingo') and performs continued training on
+('OpenTSLM/llama-3.2-1b-ecg-flamingo') and performs continued training on
 NoXi dyadic interaction data (facial AU time series + transcript descriptions).
 
 It mirrors the CurriculumTrainer from external/opentslm/curriculum_learning.py,
@@ -88,7 +88,7 @@ from noxiCoTDataset import NoXiCoTQADataset
 # DEFAULT HF CHECKPOINT
 # ============================================================================
 
-DEFAULT_HF_CHECKPOINT = "OpenTSLM/llama-3.2-3b-ecg-flamingo"
+DEFAULT_HF_CHECKPOINT = "OpenTSLM/llama-3.2-1b-ecg-flamingo"
 
 
 # ============================================================================
@@ -209,15 +209,17 @@ class ContinuedCurriculumTrainer:
     def _initialize_model_from_hf(self):
         """Initialize OpenTSLMFlamingo and load weights from HuggingFace checkpoint.
 
-        The HF checkpoint 'OpenTSLM/llama-3.2-3b-ecg-flamingo' stores a full
-        model state dict. We:
-        1. Create the OpenTSLMFlamingo architecture (with the same LLM base)
-        2. Download the checkpoint from HF Hub
+        The HF checkpoint stores a full model state dict as model_checkpoint.pt.
+        We:
+        1. Create the OpenTSLMFlamingo architecture (with the matching base LLM)
+        2. Download model_checkpoint.pt from HF Hub
         3. Load the state dict into the model
+
+        This will FAIL if the checkpoint cannot be loaded — training from
+        scratch is never allowed.
         """
-        # Determine the base LLM ID from the checkpoint name
-        # The ecg-flamingo checkpoint is built on meta-llama/Llama-3.2-3B
-        llm_id = "meta-llama/Llama-3.2-3B"
+        # The 1b ecg-flamingo checkpoint is built on meta-llama/Llama-3.2-1B
+        llm_id = "meta-llama/Llama-3.2-1B"
 
         if self.rank == 0:
             print(f"Creating OpenTSLMFlamingo with base LLM: {llm_id}")
@@ -233,92 +235,31 @@ class ContinuedCurriculumTrainer:
         if self.rank == 0:
             print(f"Downloading/loading checkpoint: {self.hf_checkpoint}")
 
-        try:
-            from huggingface_hub import hf_hub_download
-            import glob
+        from huggingface_hub import hf_hub_download
 
-            # Try to download model weights from HF Hub
-            # The checkpoint may be stored as a single .pt/.bin file or as
-            # safetensors shards
-            try:
-                # Try single-file checkpoint first
-                checkpoint_path = hf_hub_download(
-                    repo_id=self.hf_checkpoint,
-                    filename="best_model.pt",
-                    cache_dir=None,
-                )
-                checkpoint = torch.load(
-                    checkpoint_path, map_location="cpu", weights_only=False
-                )
+        checkpoint_path = hf_hub_download(
+            repo_id=self.hf_checkpoint,
+            filename="model_checkpoint.pt",
+            cache_dir=None,
+        )
 
-                if "model_state" in checkpoint:
-                    state_dict = checkpoint["model_state"]
-                else:
-                    state_dict = checkpoint
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
 
-                missing, unexpected = model.load_state_dict(state_dict, strict=False)
-                if self.rank == 0:
-                    if missing:
-                        print(f"Missing keys ({len(missing)}): {missing[:5]}...")
-                    if unexpected:
-                        print(f"Unexpected keys ({len(unexpected)}): {unexpected[:5]}...")
-                    print("Successfully loaded checkpoint from HuggingFace")
+        if "model_state" in checkpoint:
+            state_dict = checkpoint["model_state"]
+        else:
+            state_dict = checkpoint
 
-            except Exception as e1:
-                if self.rank == 0:
-                    print(f"Could not load best_model.pt: {e1}")
-                    print("Trying safetensors / pytorch_model.bin ...")
-
-                try:
-                    # Try safetensors
-                    from safetensors.torch import load_file
-                    checkpoint_path = hf_hub_download(
-                        repo_id=self.hf_checkpoint,
-                        filename="model.safetensors",
-                        cache_dir=None,
-                    )
-                    state_dict = load_file(checkpoint_path)
-                    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-                    if self.rank == 0:
-                        if missing:
-                            print(f"Missing keys ({len(missing)}): {missing[:5]}...")
-                        if unexpected:
-                            print(f"Unexpected keys ({len(unexpected)}): {unexpected[:5]}...")
-                        print("Successfully loaded safetensors checkpoint from HuggingFace")
-
-                except Exception as e2:
-                    try:
-                        # Try pytorch_model.bin
-                        checkpoint_path = hf_hub_download(
-                            repo_id=self.hf_checkpoint,
-                            filename="pytorch_model.bin",
-                            cache_dir=None,
-                        )
-                        state_dict = torch.load(
-                            checkpoint_path, map_location="cpu", weights_only=False
-                        )
-                        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-                        if self.rank == 0:
-                            if missing:
-                                print(f"Missing keys ({len(missing)}): {missing[:5]}...")
-                            if unexpected:
-                                print(f"Unexpected keys ({len(unexpected)}): {unexpected[:5]}...")
-                            print("Successfully loaded pytorch_model.bin from HuggingFace")
-
-                    except Exception as e3:
-                        if self.rank == 0:
-                            print(f"Warning: Could not load HF checkpoint weights.")
-                            print(f"  best_model.pt: {e1}")
-                            print(f"  model.safetensors: {e2}")
-                            print(f"  pytorch_model.bin: {e3}")
-                            print("Proceeding with freshly initialized model weights.")
-                            print("The model architecture is initialized from the "
-                                  "base LLM and will need training from scratch.")
-
-        except ImportError:
-            if self.rank == 0:
-                print("huggingface_hub not installed. Install with: pip install huggingface-hub")
-                print("Proceeding with freshly initialized model (no pretrained weights).")
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if self.rank == 0:
+            if missing:
+                print(f"Missing keys ({len(missing)}): {missing[:10]}")
+            if unexpected:
+                print(f"Unexpected keys ({len(unexpected)}): {unexpected[:10]}")
+            print(f"Successfully loaded checkpoint from {self.hf_checkpoint}")
+            print(f"  Checkpoint file: {checkpoint_path}")
 
         # Wrap with DDP if distributed
         if self.world_size > 1:

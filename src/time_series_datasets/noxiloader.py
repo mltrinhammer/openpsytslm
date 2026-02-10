@@ -569,10 +569,10 @@ def load_noxi_cot_splits(
 
     if train_sessions is None and val_sessions is None and test_sessions is None:
         n_total = len(all_session_ids)
-        n_train = max(1, int(0.70 * n_total))
-        n_val = max(1, int(0.15 * n_total))
-        n_test = max(1, n_total - n_train - n_val)
-        n_val = n_total - n_train - n_test
+        # Reserve 1 session for test, 5 for validation, rest for training
+        n_test = 1
+        n_val = 5
+        n_train = max(1, n_total - n_val - n_test)
 
         train_sessions = all_session_ids[:n_train]
         val_sessions = all_session_ids[n_train:n_train + n_val]
