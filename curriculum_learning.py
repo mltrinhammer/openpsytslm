@@ -290,32 +290,6 @@ class CurriculumTrainer:
             os.makedirs(os.path.join(stage_dir, "checkpoints"), exist_ok=True)
             os.makedirs(os.path.join(stage_dir, "results"), exist_ok=True)
 
-    def _default_dyadic_split(
-        self, data_model_path: str, test_count: int = 1, val_count: int = 1
-    ) -> Tuple[List[str], List[str], List[str]]:
-        """Create a deterministic video-level split with a single test session."""
-        if not os.path.exists(data_model_path):
-            raise FileNotFoundError(f"data_model_path not found: {data_model_path}")
-
-        with open(data_model_path, "r") as f:
-            data_model = yaml.safe_load(f) or {}
-
-        video_ids = sorted(list(data_model.keys()))
-        n_total = len(video_ids)
-        if n_total == 0:
-            return [], [], []
-
-        test_count = min(test_count, n_total)
-        remaining = n_total - test_count
-        val_count = min(val_count, remaining)
-        train_count = max(0, n_total - test_count - val_count)
-
-        train_videos = video_ids[:train_count]
-        val_videos = video_ids[train_count : train_count + val_count]
-        test_videos = video_ids[train_count + val_count :]
-
-        return train_videos, val_videos, test_videos
-
     def _get_optimizer(
         self,
         batch_size: int = None,
@@ -1243,9 +1217,6 @@ class CurriculumTrainer:
         self, batch_size: int = None, eval_only: bool = False,
         data_model_path: str = "data_model.yaml",
         combined_dir: str = "results/combined/",
-        train_videos: List[str] = None,
-        val_videos: List[str] = None,
-        test_videos: List[str] = None,
         base_checkpoint_path: str = os.path.join(
             "results", "noxi", "psytslm", "noxi_cot", "checkpoints", "best_model.pt"
         ),
@@ -1267,30 +1238,14 @@ class CurriculumTrainer:
             eval_only: Skip training, only evaluate
             data_model_path: Path to data_model.yaml
             combined_dir: Directory with {video_id}_combined.json files
-            train_videos: List of video IDs for training
-            val_videos: List of video IDs for validation
-            test_videos: List of video IDs for testing
             base_checkpoint_path: Path to best_model.pt from continued curriculum learning
-            If train/val/test are omitted, uses 1 test video and 1 val video by default.
         """
         sampler = None
-
-        if train_videos is None and val_videos is None and test_videos is None:
-            train_videos, val_videos, test_videos = self._default_dyadic_split(
-                data_model_path, test_count=1, val_count=1
-            )
-            if self.rank == 0:
-                print(
-                    f"Using default dyadic split: train={len(train_videos)}, val={len(val_videos)}, test={len(test_videos)}"
-                )
 
         # Define dataset constructor args
         dataset_kwargs = {
             "data_model_path": data_model_path,
             "combined_dir": combined_dir,
-            "train_videos": train_videos,
-            "val_videos": val_videos,
-            "test_videos": test_videos,
         }
 
         return self._train_stage(
@@ -1314,9 +1269,6 @@ class CurriculumTrainer:
         eval_only: bool = False,
         data_model_path: str = "data_model.yaml",
         combined_dir: str = "results/combined/",
-        train_videos: List[str] = None,
-        val_videos: List[str] = None,
-        test_videos: List[str] = None,
         base_checkpoint_path: str = os.path.join(
             "results", "noxi", "psytslm", "noxi_cot", "checkpoints", "best_model.pt"
         ),
@@ -1341,9 +1293,6 @@ class CurriculumTrainer:
             eval_only=eval_only,
             data_model_path=data_model_path,
             combined_dir=combined_dir,
-            train_videos=train_videos,
-            val_videos=val_videos,
-            test_videos=test_videos,
             base_checkpoint_path=base_checkpoint_path,
         )
         results = {"stage6_psychotherapy_cot": stage_results}
@@ -1486,24 +1435,6 @@ def main():
         help="Directory containing *_combined.json files",
     )
     parser.add_argument(
-        "--train_videos",
-        type=str,
-        default=None,
-        help="Comma-separated list of video IDs for training",
-    )
-    parser.add_argument(
-        "--val_videos",
-        type=str,
-        default=None,
-        help="Comma-separated list of video IDs for validation",
-    )
-    parser.add_argument(
-        "--test_videos",
-        type=str,
-        default=None,
-        help="Comma-separated list of video IDs for testing",
-    )
-    parser.add_argument(
         "--base_checkpoint_path",
         type=str,
         default=os.path.join(
@@ -1558,12 +1489,6 @@ def main():
 
     args = parser.parse_args()
 
-    def _parse_list(value: Optional[str]) -> Optional[List[str]]:
-        if value is None:
-            return None
-        items = [item.strip() for item in value.split(",") if item.strip()]
-        return items or None
-
     # Set up global logging
     set_global_verbose(args.verbose)
     logger = get_logger(verbose=args.verbose)
@@ -1585,9 +1510,6 @@ def main():
         eval_only=args.eval_only,
         data_model_path=args.data_model_path,
         combined_dir=args.combined_dir,
-        train_videos=_parse_list(args.train_videos),
-        val_videos=_parse_list(args.val_videos),
-        test_videos=_parse_list(args.test_videos),
         base_checkpoint_path=args.base_checkpoint_path,
     )
 
