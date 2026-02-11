@@ -13,14 +13,9 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "external", "opentslm", "src")))
 
 import json
-import os as _os
 import argparse
-from typing import List, Optional, Dict, Any, Callable
-from time_series_datasets.TSQADataset import TSQADataset
-from time_series_datasets.m4.M4QADataset import M4QADataset
-from time_series_datasets.sleep.SleepEDFCoTQADataset import SleepEDFCoTQADataset
-from time_series_datasets.har_cot.HARCoTQADataset import HARCoTQADataset
-from time_series_datasets.ecg_qa.ECGQACoTQADataset import ECGQACoTQADataset
+from typing import List, Optional, Dict, Any, Callable, Tuple
+import yaml
 from time_series_datasets.util import (
     extend_time_series_to_match_patch_size_and_aggregate,
 )
@@ -41,22 +36,11 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import (
-    CPUOffload,
-    MixedPrecision,
-    ShardingStrategy,
-    BackwardPrefetch,
-    FullStateDictConfig,
-    StateDictType,
-)
 from tqdm.auto import tqdm
 from transformers import get_linear_schedule_with_warmup
 
-from model.encoder.TransformerCNNEncoder import TransformerCNNEncoder
 from model.llm.OpenTSLMFlamingo import OpenTSLMFlamingo
 from model.llm.OpenTSLMSP import OpenTSLMSP
-from model.projector.MLPProjector import MLPProjector
 import datetime
 from logger import get_logger, set_global_verbose
 
@@ -73,163 +57,103 @@ from model_config import (
 )
 
 
+# Only stage used in this psychotherapy fine-tuning pipeline
+CURRICULUM_STAGES = ["stage6_psychotherapy_cot"]
+
+
 # GPU and Memory Monitoring Utilities
 class GPUMemoryMonitor:
     """Monitor GPU memory usage and system memory."""
-    
+
     def __init__(self, device="cuda", rank=0):
         self.device = device
         self.rank = rank
         self.has_gpu = torch.cuda.is_available()
-        
+
         if self.has_gpu:
             try:
                 import pynvml
                 pynvml.nvmlInit()
                 self.nvml_available = True
                 self.handle = pynvml.nvmlDeviceGetHandleByIndex(rank) if rank < torch.cuda.device_count() else None
-            except:
+            except Exception:
                 self.nvml_available = False
                 self.handle = None
-    
+
     def get_gpu_memory_info(self):
         """Get detailed GPU memory information."""
         if not self.has_gpu:
             return {}
-        
+
         info = {}
         try:
-            # PyTorch memory stats
             info['allocated_gb'] = torch.cuda.memory_allocated(self.device) / 1024**3
             info['reserved_gb'] = torch.cuda.memory_reserved(self.device) / 1024**3
             info['max_allocated_gb'] = torch.cuda.max_memory_allocated(self.device) / 1024**3
             info['max_reserved_gb'] = torch.cuda.max_memory_reserved(self.device) / 1024**3
-            
-            # NVML stats (more accurate)
+
             if self.nvml_available and self.handle:
                 import pynvml
                 mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.handle)
                 util_info = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
                 temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
-                
+
                 info['total_gb'] = mem_info.total / 1024**3
                 info['used_gb'] = mem_info.used / 1024**3
                 info['free_gb'] = mem_info.free / 1024**3
                 info['utilization_pct'] = util_info.gpu
-                info['memory_utilization_pct'] = util_info.memory
-                info['temperature_c'] = temp
+                info['temperature'] = temp
         except Exception as e:
-            info['error'] = str(e)
-        
+            print(f"Warning: Could not get GPU memory info: {e}")
+
         return info
-    
-    def get_system_memory_info(self):
-        """Get system RAM information."""
-        import psutil
-        mem = psutil.virtual_memory()
-        return {
-            'total_gb': mem.total / 1024**3,
-            'available_gb': mem.available / 1024**3,
-            'used_gb': mem.used / 1024**3,
-            'percent': mem.percent
-        }
-    
+
     def print_memory_summary(self, prefix=""):
-        """Print a formatted memory summary."""
-        if self.rank != 0:
+        """Print a summary of current GPU memory usage."""
+        if not self.has_gpu:
             return
-        
-        print(f"\n{prefix}Memory Status:")
-        print("=" * 60)
-        
-        # GPU Memory
-        if self.has_gpu:
-            gpu_info = self.get_gpu_memory_info()
-            print(f"🎮 GPU {self.rank} Memory:")
-            if 'allocated_gb' in gpu_info:
-                print(f"   Allocated:     {gpu_info['allocated_gb']:6.2f} GB")
-                print(f"   Reserved:      {gpu_info['reserved_gb']:6.2f} GB")
-                print(f"   Peak Allocated:{gpu_info['max_allocated_gb']:6.2f} GB")
-                print(f"   Peak Reserved: {gpu_info['max_reserved_gb']:6.2f} GB")
-            
-            if 'total_gb' in gpu_info:
-                print(f"   Total VRAM:    {gpu_info['total_gb']:6.2f} GB")
-                print(f"   Used VRAM:     {gpu_info['used_gb']:6.2f} GB ({gpu_info['used_gb']/gpu_info['total_gb']*100:.1f}%)")
-                print(f"   Free VRAM:     {gpu_info['free_gb']:6.2f} GB")
-            
-            if 'utilization_pct' in gpu_info:
-                print(f"   GPU Util:      {gpu_info['utilization_pct']:6.1f}%")
-                print(f"   Memory Util:   {gpu_info['memory_utilization_pct']:6.1f}%")
-                print(f"   Temperature:   {gpu_info['temperature_c']:6.1f}°C")
-        
-        # System Memory
-        try:
-            sys_info = self.get_system_memory_info()
-            print(f"\n💻 System RAM:")
-            print(f"   Total:         {sys_info['total_gb']:6.2f} GB")
-            print(f"   Used:          {sys_info['used_gb']:6.2f} GB ({sys_info['percent']:.1f}%)")
-            print(f"   Available:     {sys_info['available_gb']:6.2f} GB")
-        except:
-            pass
-        
-        print("=" * 60)
-    
+        info = self.get_gpu_memory_info()
+        if info:
+            print(f"{prefix}GPU Memory: allocated={info.get('allocated_gb', 0):.2f}GB, "
+                  f"reserved={info.get('reserved_gb', 0):.2f}GB, "
+                  f"max_allocated={info.get('max_allocated_gb', 0):.2f}GB")
+            if 'total_gb' in info:
+                print(f"{prefix}GPU Total: {info['total_gb']:.2f}GB, "
+                      f"used={info['used_gb']:.2f}GB, "
+                      f"free={info['free_gb']:.2f}GB, "
+                      f"util={info.get('utilization_pct', 'N/A')}%")
+
     def reset_peak_stats(self):
         """Reset peak memory statistics."""
         if self.has_gpu:
             torch.cuda.reset_peak_memory_stats(self.device)
-    
+
     def cleanup(self):
-        """Cleanup NVML."""
-        if self.nvml_available:
+        """Clean up NVML resources."""
+        if self.has_gpu and self.nvml_available:
             try:
                 import pynvml
                 pynvml.nvmlShutdown()
-            except:
+            except Exception:
                 pass
-
-
-# Global stage configuration - users can modify this to mix and match stages
-CURRICULUM_STAGES = [
-    "stage1_mcq",
-    "stage2_captioning",
-    "stage3_cot",
-    "stage4_sleep_cot",
-    "stage5_ecg_cot",
-    "stage6_psychotherapy_cot",
-]
 
 
 class CurriculumTrainer:
     """
-    Curriculum learning trainer for OpenTSLM models.
-    Trains models stage by stage with shared training logic.
-    While this may look like a lot of code, it's actually quite modular.
-    We simply train either OpenTSLMSP or OpenTSLMFlamingo, both using the same training loop.
-    We train across different stages:
-    - stage1_mcq: Trains the model on a time-series MCQ dataset (TSQA)
-    - stage2_captioning: Trains the model on a time-series captioning dataset (M4 time series captioning)
-    - stage3_cot: Trains the model on a chain-of-thought reasoning dataset (HAR CoT)
-    - stage4_sleep_cot: Trains the model on sleep stage classification with chain-of-thought reasoning
-    - stage5_ecg_cot: Trains the model on ECG QA with chain-of-thought reasoning
+    Stage-6-only curriculum trainer for OpenTSLM models.
 
-    Features:
-    - Automatic loss history tracking saved to loss_history.txt in each stage's checkpoints directory
-    - Loss history is appended to when resuming training, preserving all previous epochs
-    - Displays previous loss history when resuming training
-
-    If you run this script, you should be able to reproduce our results from the paper.
-    All datasets are automatically downloaded and processed.
+    Fine-tunes a pretrained OpenTSLM model on psychotherapy facial AU data.
+    Initialises from a local best_model.pt checkpoint produced by
+    continued_curriculum_learning.py (default path:
+    results/noxi/psytslm/noxi_cot/checkpoints/best_model.pt).
     """
 
     def _sanitize_llm_id(self, llm_id: str) -> str:
-        """Sanitize llm_id for use in directory names (e.g., meta-llama/Llama-3.2-1B -> Llama3_2_1B)"""
+        """Sanitize llm_id for use in directory names."""
         if not llm_id:
             return "unknown_llm"
-        # Take last part after /, replace . and - with _
         name = llm_id.split("/")[-1]
         name = name.replace(".", "_").replace("-", "_")
-        # Optionally, remove duplicate underscores
         while "__" in name:
             name = name.replace("__", "_")
         return name
@@ -244,24 +168,10 @@ class CurriculumTrainer:
         local_rank: int = int(os.environ.get("LOCAL_RANK", 0)),
         llm_id: str = None,
     ):
-        """
-        Initialize the curriculum trainer.
-
-        Args:
-            model_type: Either 'OpenTSLMSP' or 'OpenTSLMFlamingo'
-            device: Device to use for training ('cuda', 'mps', or 'cpu')
-            gradient_checkpointing: Enable gradient checkpointing
-            dist_url: URL used to set up distributed training
-            dist_backend: Distributed backend
-            local_rank: Local GPU rank
-            llm_id: LLM model ID (e.g., 'google/medgemma-2b', 'meta-llama/Llama-3.2-1B')
-        """
         self.model_type = model_type
         self.device = device or self._get_device()
         if self.device == "mps":
-            print(
-                "🚨 Warning: Using MPS, might not be fully compatible with the model. Use CUDA for best results."
-            )
+            print("Warning: Using MPS, might not be fully compatible. Use CUDA for best results.")
         self.llm_id = llm_id
         self.llm_id_safe = self._sanitize_llm_id(llm_id)
 
@@ -316,97 +226,46 @@ class CurriculumTrainer:
 
         return model
 
-    def load_pretrained_from_huggingface(self, repo_id: str, filename: str = "model_checkpoint.pt"):
+    def load_pretrained_from_checkpoint(self, checkpoint_path: str):
         """
-        Load a pretrained OpenTSLM model checkpoint from HuggingFace Hub.
-        
+        Load a pretrained OpenTSLM model checkpoint from a local path.
+
         Args:
-            repo_id: HuggingFace repository ID (e.g., 'OpenTSLM/llama-3.2-3b-ecg-flamingo')
-            filename: Checkpoint filename in the repo (default: 'model_checkpoint.pt')
-        
-        Example:
-            trainer.load_pretrained_from_huggingface('OpenTSLM/llama-3.2-3b-ecg-flamingo')
+            checkpoint_path: Path to a checkpoint file (e.g., best_model.pt).
         """
-        try:
-            from huggingface_hub import hf_hub_download
-        except ImportError:
-            raise ImportError(
-                "huggingface_hub is required to load from HuggingFace. "
-                "Install it with: pip install huggingface-hub"
-            )
-        
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
         if self.rank == 0:
-            print(f"📥 Downloading pretrained model from HuggingFace: {repo_id}/{filename}")
-        
-        # Download checkpoint from HuggingFace Hub
-        checkpoint_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            cache_dir=None,  # Uses default HF cache directory
-        )
-        
-        if self.rank == 0:
-            print(f"✅ Downloaded checkpoint to: {checkpoint_path}")
-            print(f"🔧 Loading checkpoint into {self.model_type}...")
-        
-        # Load the checkpoint
+            print(f"Loading pretrained model from: {checkpoint_path}")
+
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        
-        # Get the underlying model (handles DDP wrapping)
         model = self._get_model()
-        
+
         if self.model_type == "OpenTSLMSP":
-            # Load encoder and projector state
-            if "encoder_state" in checkpoint:
-                model.encoder.load_state_dict(checkpoint["encoder_state"])
-                if self.rank == 0:
-                    print("✅ Loaded encoder state")
-            
-            if "projector_state" in checkpoint:
-                model.projector.load_state_dict(checkpoint["projector_state"])
-                if self.rank == 0:
-                    print("✅ Loaded projector state")
-            
-            # Try to load LoRA state if available
+            if "encoder_state" not in checkpoint or "projector_state" not in checkpoint:
+                raise RuntimeError("Checkpoint is missing encoder/projector states for OpenTSLMSP")
+            model.encoder.load_state_dict(checkpoint["encoder_state"])
+            model.projector.load_state_dict(checkpoint["projector_state"])
             try:
-                loaded_count = model.load_lora_state_from_checkpoint(checkpoint, allow_missing=True)
-                if loaded_count > 0 and self.rank == 0:
-                    print(f"✅ Loaded LoRA adapters: {loaded_count} parameters")
+                model.load_lora_state_from_checkpoint(checkpoint, allow_missing=True)
             except Exception as e:
                 if self.rank == 0:
-                    print(f"⚠️  Could not load LoRA state: {e}")
-        
-        elif self.model_type == "OpenTSLMFlamingo":
-            # Load model state for Flamingo
+                    print(f"Warning: failed to load LoRA state: {e}")
+        else:
             model_state = checkpoint.get("model_state", checkpoint)
-            
             if hasattr(self.model, "module"):
-                # Add 'module.' prefix for DDP
                 model_state = {f"module.{k}": v for k, v in model_state.items()}
-            
-            # Load state dict with strict=False to handle missing keys
+
             missing_keys, unexpected_keys = self.model.load_state_dict(model_state, strict=False)
-            
-            if missing_keys and self.rank == 0:
-                print(f"⚠️  Missing keys when loading checkpoint:")
-                for key in missing_keys[:5]:
-                    print(f"   - {key}")
-                if len(missing_keys) > 5:
-                    print(f"   ... and {len(missing_keys) - 5} more keys")
-            
-            if unexpected_keys and self.rank == 0:
-                print(f"⚠️  Unexpected keys when loading checkpoint:")
-                for key in unexpected_keys[:5]:
-                    print(f"   - {key}")
-                if len(unexpected_keys) > 5:
-                    print(f"   ... and {len(unexpected_keys) - 5} more keys")
-        
+            if self.rank == 0:
+                if missing_keys:
+                    print(f"Warning: missing keys when loading checkpoint: {len(missing_keys)}")
+                if unexpected_keys:
+                    print(f"Warning: unexpected keys when loading checkpoint: {len(unexpected_keys)}")
+
         if self.rank == 0:
-            print(f"✅ Successfully loaded pretrained model from {repo_id}")
-            if "epoch" in checkpoint:
-                print(f"   Checkpoint epoch: {checkpoint['epoch']}")
-            if "val_loss" in checkpoint:
-                print(f"   Checkpoint val_loss: {checkpoint['val_loss']:.4f}")
+            print("Pretrained model loaded successfully")
 
     def _get_cast_dtype(self, precision: str):
         """Get cast dtype for mixed precision."""
@@ -430,6 +289,32 @@ class CurriculumTrainer:
             os.makedirs(stage_dir, exist_ok=True)
             os.makedirs(os.path.join(stage_dir, "checkpoints"), exist_ok=True)
             os.makedirs(os.path.join(stage_dir, "results"), exist_ok=True)
+
+    def _default_dyadic_split(
+        self, data_model_path: str, test_count: int = 1, val_count: int = 1
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Create a deterministic video-level split with a single test session."""
+        if not os.path.exists(data_model_path):
+            raise FileNotFoundError(f"data_model_path not found: {data_model_path}")
+
+        with open(data_model_path, "r") as f:
+            data_model = yaml.safe_load(f) or {}
+
+        video_ids = sorted(list(data_model.keys()))
+        n_total = len(video_ids)
+        if n_total == 0:
+            return [], [], []
+
+        test_count = min(test_count, n_total)
+        remaining = n_total - test_count
+        val_count = min(val_count, remaining)
+        train_count = max(0, n_total - test_count - val_count)
+
+        train_videos = video_ids[:train_count]
+        val_videos = video_ids[train_count : train_count + val_count]
+        test_videos = video_ids[train_count + val_count :]
+
+        return train_videos, val_videos, test_videos
 
     def _get_optimizer(
         self,
@@ -783,150 +668,11 @@ class CurriculumTrainer:
             )
         return None, float("inf")
 
-    def _load_previous_stage_model(
-        self, current_stage: str
-    ) -> Optional[Dict[str, Any]]:
-        """Load the best model from the previous stage and return its metrics."""
-        try:
-            current_idx = CURRICULUM_STAGES.index(current_stage)
-            if current_idx == 0:
-                # First stage, no previous model to load
-                return None
-            previous_stage = CURRICULUM_STAGES[current_idx - 1]
-            metrics_file = os.path.join(
-                self.results_dir, previous_stage, "results", "metrics.json"
-            )
-            if not os.path.exists(metrics_file):
-                # PATCH: If running stage2_captioning and previous stage metrics are missing, skip loading
-                if current_stage in ["stage2_captioning", "stage6_psychotherapy_cot"]:
-                    if self.rank == 0:
-                        print(
-                            f"⚠️  Skipping previous stage {previous_stage} because metrics file not found: {metrics_file}"
-                        )
-                    if current_stage == "stage6_psychotherapy_cot":
-                        print(f"    Assuming pre_Trained model from Huggingface already includes stage5 training")
-                    return None
-                raise RuntimeError(
-                    f"Previous stage {previous_stage} metrics file not found: {metrics_file}"
-                )
-            # Be robust to malformed JSON (e.g., concurrent writes or concatenated JSON)
-            try:
-                with open(metrics_file, "r") as f:
-                    metrics = json.load(f)
-            except Exception as e:
-                if self.rank == 0:
-                    print(
-                        f"⚠️  Warning: Could not parse metrics file for {previous_stage} ({metrics_file}): {e}"
-                    )
-                    print("   Proceeding without previous metrics.")
-                metrics = {}
-            # Load the model weights from previous stage
-            checkpoint_path = os.path.join(
-                self.results_dir, previous_stage, "checkpoints", "best_model.pt"
-            )
-            if not os.path.exists(checkpoint_path):
-                # PATCH: If running stage2_captioning and previous stage checkpoint is missing, skip loading
-                if current_stage == "stage2_captioning":
-                    if self.rank == 0:
-                        print(
-                            f"⚠️  Skipping previous stage {previous_stage} because checkpoint not found: {checkpoint_path}"
-                        )
-                    return None
-                raise RuntimeError(
-                    f"Previous stage {previous_stage} checkpoint not found: {checkpoint_path}"
-                )
-            print(
-                "Loading checkpoint from previous stage: ",
-                checkpoint_path,
-                "and model type: ",
-                self.model_type,
-                "and llm_id: ",
-                self.llm_id,
-            )
-            print("This might take a while")
-            checkpoint = torch.load(
-                checkpoint_path, map_location="cpu", weights_only=False
-            )
-            # Get the underlying model (handles DDP wrapping)
-            model = self._get_model()
-            if self.model_type == "OpenTSLMSP":
-                model.encoder.load_state_dict(checkpoint["encoder_state"])
-                model.projector.load_state_dict(checkpoint["projector_state"])
-
-                # Load LoRA state from previous stage (allow missing for stage transitions)
-                try:
-                    loaded_count = model.load_lora_state_from_checkpoint(
-                        checkpoint, allow_missing=True
-                    )
-                    if loaded_count > 0 and self.rank == 0:
-                        print(
-                            f"📥 Loaded LoRA adapters from previous stage: {loaded_count} parameters"
-                        )
-                except RuntimeError as e:
-                    if self.rank == 0:
-                        print(f"❌ Failed to load LoRA state from previous stage: {e}")
-                    # For previous stage loading, we can be more tolerant of LoRA mismatches
-                    # as stages might have different LoRA configurations
-            else:
-                # Handle OpenTSLMFlamingo with graceful loading
-                model_state = checkpoint["model_state"]
-                if hasattr(self.model, "module"):
-                    # Add 'module.' prefix for DDP
-                    model_state = {f"module.{k}": v for k, v in model_state.items()}
-                # Load state dict with strict=False to handle missing keys
-                try:
-                    missing_keys, unexpected_keys = self.model.load_state_dict(
-                        model_state, strict=False
-                    )
-                    if missing_keys and self.rank == 0:
-                        print(
-                            f"⚠️  Warning: Missing keys when loading previous stage {previous_stage}:"
-                        )
-                        for key in missing_keys[:5]:  # Show first 5 missing keys
-                            print(f"   - {key}")
-                        if len(missing_keys) > 5:
-                            print(f"   ... and {len(missing_keys) - 5} more keys")
-                        print(
-                            f"   This is normal when transitioning between stages with different model configurations."
-                        )
-                    if unexpected_keys and self.rank == 0:
-                        print(
-                            f"⚠️  Warning: Unexpected keys when loading previous stage {previous_stage}:"
-                        )
-                        for key in unexpected_keys[:5]:  # Show first 5 unexpected keys
-                            print(f"   - {key}")
-                        if len(unexpected_keys) > 5:
-                            print(f"   ... and {len(unexpected_keys) - 5} more keys")
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Failed to load model state from previous stage {previous_stage}: {e}"
-                    )
-            return {
-                "stage": previous_stage,
-                "metrics": metrics,
-                "epoch": checkpoint.get("epoch", "?"),
-                "val_loss": checkpoint.get("val_loss", "?"),
-            }
-        except Exception as e:
-            raise RuntimeError(f"Failed to load previous stage model: {e}")
-
-    def _calculate_accuracy(
-        self, predictions: List[str], gold_answers: List[str]
-    ) -> float:
-        """Calculate accuracy for MCQ tasks."""
-        correct = 0
-        total = len(predictions)
-
-        for pred, gold in zip(predictions, gold_answers):
-            # Clean up predictions and gold answers
-            pred_clean = pred.strip()
-            gold_clean = gold.strip()
-
-            # Check if gold starts with the cleaned prediction (more robust matching)
-            if gold_clean.startswith(pred_clean) or pred_clean == gold_clean:
-                correct += 1
-
-        return correct / total if total > 0 else 0.0
+    def _load_stage6_base_checkpoint(self, checkpoint_path: str) -> None:
+        """Load the base stage6 checkpoint if no stage checkpoint is present."""
+        if not checkpoint_path:
+            return
+        self.load_pretrained_from_checkpoint(checkpoint_path)
 
     def _evaluate_stage(
         self,
@@ -1004,19 +750,6 @@ class CurriculumTrainer:
                             "generated": pred,
                             "gold": gold,
                         }
-
-                        # Add time series ID for stage2 captioning
-                        if stage == "stage2_captioning" and "id" in sample:
-                            result["time_series_id"] = sample["id"]
-
-                        # Add template_id and ecg_id for stage5_ecg_cot
-                        if stage == "stage5_ecg_cot":
-                            if "template_id" in sample:
-                                result["template_id"] = sample["template_id"]
-                            if "ecg_id" in sample:
-                                result["ecg_id"] = sample["ecg_id"]
-                            if "correct_answer" in sample:
-                                result["correct_answer"] = sample["correct_answer"]
 
                         # Add metadata for stage6_psychotherapy_cot
                         if stage == "stage6_psychotherapy_cot":
@@ -1157,6 +890,7 @@ class CurriculumTrainer:
         eval_only: bool = False,
         sampler=None,
         dataset_kwargs: Dict[str, Any] = None,
+        base_checkpoint_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generic training function for any stage."""
         epoch = None
@@ -1191,46 +925,16 @@ class CurriculumTrainer:
             gpu_monitor = GPUMemoryMonitor(device=self.device, rank=self.rank)
             gpu_monitor.print_memory_summary("🔧 Initial ")
 
-        # Check if checkpoint exists when in eval_only mode
-        if eval_only and not self._checkpoint_exists(stage_name):
+        has_stage_checkpoint = self._checkpoint_exists(stage_name)
+        if eval_only and (not has_stage_checkpoint) and not base_checkpoint_path:
             raise RuntimeError(
                 f"Eval-only mode requires a checkpoint for {stage_name}, but none found at {os.path.join(self.results_dir, stage_name, 'checkpoints', 'best_model.pt')}"
             )
 
-        # Load previous stage model and display metrics
-        try:
-            previous_stage_info = self._load_previous_stage_model(stage_name)
-            if previous_stage_info:
-                if self.rank == 0:
-                    print(f"📂 Loading best model from {previous_stage_info['stage']}:")
-                    print(f"   Achieved at epoch: {previous_stage_info['epoch']}")
-                    val_loss = previous_stage_info["val_loss"]
-                    if isinstance(val_loss, (int, float)):
-                        print(f"   Validation loss: {val_loss:.4f}")
-                    else:
-                        print(f"   Validation loss: {val_loss}")
-                    for metric, value in previous_stage_info["metrics"].items():
-                        if isinstance(value, (int, float)):
-                            print(f"   {metric}: {value:.4f}")
-                        else:
-                            print(f"   {metric}: {value}")
-                    print()
-            else:
-                # Only allow fresh model for first stage or stages with pre-trained checkpoints
-                if stage_name not in [CURRICULUM_STAGES[0], "stage6_psychotherapy_cot"]:
-                    raise RuntimeError(
-                        f"Cannot start {stage_name} with fresh model. Previous stage {CURRICULUM_STAGES[CURRICULUM_STAGES.index(stage_name) - 1]} must be completed first."
-                    )
-                if self.rank == 0:
-                    if stage_name == "stage6_psychotherapy_cot":
-                        print("🤗 Starting stage6 with HuggingFace pre-trained model")
-                    else:
-                        print("🆕 Starting with fresh model (first stage)")
-                    print()
-        except Exception as e:
+        if not has_stage_checkpoint and base_checkpoint_path:
             if self.rank == 0:
-                print(f"❌ Error loading previous stage: {e}")
-            raise Exception(f"Error loading previous stage: {e}")
+                print(f"Loading base checkpoint for {stage_name}")
+            self._load_stage6_base_checkpoint(base_checkpoint_path)
 
         # Check if evaluation was already completed
         evaluation_completed = self._is_evaluation_completed(stage_name)
@@ -1256,9 +960,6 @@ class CurriculumTrainer:
 
             return metrics
 
-        # Enable LoRA if needed for this stage
-        self._enable_lora_if_needed(stage_name)
-
         # Initialize optimizer and scheduler
         optimizer = self._get_optimizer(batch_size, lr_encoder, lr_projector, lr_base)
 
@@ -1266,7 +967,7 @@ class CurriculumTrainer:
         if sampler is not None:
             if self.world_size > 1:
                 get_logger().warning(
-                    "BalancedBatchSampler was provided, but distributed training (DDP) is enabled. BalancedBatchSampler will NOT be used. Data will be sharded using DistributedSampler instead. Typically for stage3_cot it is better to use BalancedBatchSampler, if dataset is imbalanced."
+                    "BalancedBatchSampler was provided, but distributed training (DDP) is enabled. BalancedBatchSampler will NOT be used. Data will be sharded using DistributedSampler instead."
                 )
                 train_loader = self._merge_data_loaders(
                     [
@@ -1538,197 +1239,22 @@ class CurriculumTrainer:
 
         return metrics
 
-    def stage1_mcq(
-        self, batch_size: int = None, eval_only: bool = False
-    ) -> Dict[str, Any]:
-        """Stage 1: Multiple Choice Question Answering (TSQA).
-
-        Configuration:
-        - Epochs: 20
-        - OpenTSLMSP: encoder_lr=2e-4, projector_lr=1e-4
-        - OpenTSLMFlamingo: base_lr=2e-4
-        - Metric: Accuracy
-        """
-        return self._train_stage(
-            stage_name="stage1_mcq",
-            dataset_class=TSQADataset,
-            num_epochs=30,
-            lr_encoder=2e-4,
-            lr_projector=1e-4,
-            lr_base=2e-4,
-            metric_func=lambda preds, golds: {
-                "accuracy": self._calculate_accuracy(preds, golds)
-            },
-            batch_size=batch_size,
-            eval_only=eval_only,
-        )
-
-    def stage2_captioning(
-        self, batch_size: int = None, eval_only: bool = False
-    ) -> Dict[str, Any]:
-        """Stage 2: Caption Generation (M4).
-
-        Configuration:
-        - Epochs: 15
-        - OpenTSLMSP: encoder_lr=1e-4, projector_lr=5e-5 (lower for fine-tuning)
-        - OpenTSLMFlamingo: base_lr=1e-4 (lower for fine-tuning)
-        - Metric: Test loss only
-        """
-        return self._train_stage(
-            stage_name="stage2_captioning",
-            dataset_class=M4QADataset,
-            num_epochs=20,
-            lr_encoder=2e-4,
-            lr_projector=1e-4,
-            lr_base=2e-4,
-            metric_func=None,  # Only test loss for captioning
-            batch_size=batch_size,
-            eval_only=eval_only,
-        )
-
-    def stage3_cot(
-        self, batch_size: int = None, eval_only: bool = False
-    ) -> Dict[str, Any]:
-        """Stage CoT: Chain-of-Thought Reasoning (HAR).
-
-        Configuration:
-        - Epochs: 100
-        - OpenTSLMSP: encoder_lr=2e-4, projector_lr=1e-4
-        - OpenTSLMFlamingo: base_lr=2e-4
-        - Metric: Test loss only (chain-of-thought reasoning)
-        """
-        sampler = None
-
-        return self._train_stage(
-            stage_name="stage3_cot",
-            dataset_class=HARCoTQADataset,
-            num_epochs=30,
-            lr_encoder=2e-4,
-            lr_projector=1e-4,
-            lr_base=2e-4,
-            metric_func=None,  # Only test loss for chain-of-thought reasoning
-            batch_size=batch_size,
-            eval_only=eval_only,
-            sampler=sampler,
-        )
-
-    def stage4_sleep_cot(
-        self, batch_size: int = None, eval_only: bool = False
-    ) -> Dict[str, Any]:
-        """Stage 4: Chain-of-Thought Reasoning (SleepEDF).
-
-        Configuration:
-        - Epochs: 60
-        - OpenTSLMSP: encoder_lr=2e-4, projector_lr=1e-4
-        - OpenTSLMFlamingo: base_lr=2e-4
-        - Metric: Test loss only (chain-of-thought reasoning)
-        """
-        sampler = None
-
-        return self._train_stage(
-            stage_name="stage4_sleep_cot",
-            dataset_class=SleepEDFCoTQADataset,
-            num_epochs=60,
-            lr_encoder=2e-4,
-            lr_projector=1e-4,
-            lr_base=2e-4,
-            metric_func=None,  # Only test loss for chain-of-thought reasoning
-            batch_size=batch_size,
-            eval_only=eval_only,
-            sampler=sampler,
-        )
-
-    def stage5_ecg_cot(
-        self, batch_size: int = None, eval_only: bool = False
-    ) -> Dict[str, Any]:
-        """Stage 5: Chain-of-Thought Reasoning (ECG QA CoT).
-
-        Configuration:
-        - Epochs: 60
-        - OpenTSLMSP: encoder_lr=2e-4, projector_lr=1e-4
-        - OpenTSLMFlamingo: base_lr=2e-4
-        - Metric: Test loss only (chain-of-thought reasoning)
-        """
-        sampler = None
-
-        return self._train_stage(
-            stage_name="stage5_ecg_cot",
-            dataset_class=ECGQACoTQADataset,
-            num_epochs=60,
-            lr_encoder=2e-4,
-            lr_projector=1e-4,
-            lr_base=2e-4,
-            metric_func=None,  # Only test loss for chain-of-thought reasoning
-            batch_size=batch_size,
-            eval_only=eval_only,
-            sampler=sampler,
-        )
-
-    def stage4_sleep_cot(
-        self, batch_size: int = None, eval_only: bool = False
-    ) -> Dict[str, Any]:
-        """Stage 4: Chain-of-Thought Reasoning (SleepEDF).
-
-        Configuration:
-        - Epochs: 60
-        - OpenTSLMSP: encoder_lr=2e-4, projector_lr=1e-4
-        - OpenTSLMFlamingo: base_lr=2e-4
-        - Metric: Test loss only (chain-of-thought reasoning)
-        """
-        sampler = None
-
-        return self._train_stage(
-            stage_name="stage4_sleep_cot",
-            dataset_class=SleepEDFCoTQADataset,
-            num_epochs=60,
-            lr_encoder=2e-4,
-            lr_projector=1e-4,
-            lr_base=2e-4,
-            metric_func=None,  # Only test loss for chain-of-thought reasoning
-            batch_size=batch_size,
-            eval_only=eval_only,
-            sampler=sampler,
-        )
-
-    def stage5_ecg_cot(
-        self, batch_size: int = None, eval_only: bool = False
-    ) -> Dict[str, Any]:
-        """Stage 5: Chain-of-Thought Reasoning (ECG QA CoT).
-
-        Configuration:
-        - Epochs: 60
-        - OpenTSLMSP: encoder_lr=2e-4, projector_lr=1e-4
-        - OpenTSLMFlamingo: base_lr=2e-4
-        - Metric: Test loss only (chain-of-thought reasoning)
-        """
-        sampler = None
-
-        return self._train_stage(
-            stage_name="stage5_ecg_cot",
-            dataset_class=ECGQACoTQADataset,
-            num_epochs=60,
-            lr_encoder=2e-4,
-            lr_projector=1e-4,
-            lr_base=2e-4,
-            metric_func=None,  # Only test loss for chain-of-thought reasoning
-            batch_size=batch_size,
-            eval_only=eval_only,
-            sampler=sampler,
-        )
-
     def stage6_psychotherapy_cot(
         self, batch_size: int = None, eval_only: bool = False,
         data_model_path: str = "data_model.yaml",
         combined_dir: str = "results/combined/",
         train_videos: List[str] = None,
         val_videos: List[str] = None,
-        test_videos: List[str] = None
+        test_videos: List[str] = None,
+        base_checkpoint_path: str = os.path.join(
+            "results", "noxi", "psytslm", "noxi_cot", "checkpoints", "best_model.pt"
+        ),
     ) -> Dict[str, Any]:
-        """Stage 6: Chain-of-Thought Reasoning (Psychotherapy).
+        """Stage 6: Chain-of-Thought Reasoning. Continued training from NoXi dataset on the Dyadic dataset, which is just the Daily Talkshow.
         
-        Fine-tunes a pretrained OpenTSLM model on psychotherapy facial AU data.
-        This stage can load a pretrained model from HuggingFace (e.g., OpenTSLM/llama-3.2-3b-ecg-flamingo)
-        and fine-tune it on the psychotherapy dataset created by combine_transcripts_with_time_series_descriptions.py.
+        Fine-tunes a pretrained OpenTSLM model.
+        This stage initializes from a local best_model.pt checkpoint (from continued_curriculum_learning.py)
+        and fine-tunes it on the psychotherapy dataset created by combine_transcripts_with_time_series_descriptions.py.
 
         Configuration:
         - Epochs: 60
@@ -1744,8 +1270,19 @@ class CurriculumTrainer:
             train_videos: List of video IDs for training
             val_videos: List of video IDs for validation
             test_videos: List of video IDs for testing
+            base_checkpoint_path: Path to best_model.pt from continued curriculum learning
+            If train/val/test are omitted, uses 1 test video and 1 val video by default.
         """
         sampler = None
+
+        if train_videos is None and val_videos is None and test_videos is None:
+            train_videos, val_videos, test_videos = self._default_dyadic_split(
+                data_model_path, test_count=1, val_count=1
+            )
+            if self.rank == 0:
+                print(
+                    f"Using default dyadic split: train={len(train_videos)}, val={len(val_videos)}, test={len(test_videos)}"
+                )
 
         # Define dataset constructor args
         dataset_kwargs = {
@@ -1768,90 +1305,53 @@ class CurriculumTrainer:
             eval_only=eval_only,
             sampler=sampler,
             dataset_kwargs=dataset_kwargs,
+            base_checkpoint_path=base_checkpoint_path,
         )
 
     def run_curriculum(
-        self, stages: List[str] = None, batch_size: int = None, eval_only: bool = False
+        self,
+        batch_size: int = None,
+        eval_only: bool = False,
+        data_model_path: str = "data_model.yaml",
+        combined_dir: str = "results/combined/",
+        train_videos: List[str] = None,
+        val_videos: List[str] = None,
+        test_videos: List[str] = None,
+        base_checkpoint_path: str = os.path.join(
+            "results", "noxi", "psytslm", "noxi_cot", "checkpoints", "best_model.pt"
+        ),
     ):
-        """Run the complete curriculum learning pipeline."""
-        if stages is None:
-            stages = CURRICULUM_STAGES
-
-        # Filter out completed stages
-        incomplete_stages = []
-        for stage in stages:
-            if self._is_stage_completed(stage):
-                if self.rank == 0:
-                    print(f"⏭️  Skipping completed stage: {stage}")
-            else:
-                incomplete_stages.append(stage)
-
+        """Run the stage6 psychotherapy curriculum."""
         if self.rank == 0:
-            print(f"🎓 Starting Curriculum Learning with {self.model_type}")
+            print(f"Starting stage6 curriculum with {self.model_type}")
             if eval_only:
-                print("🔍 EVAL-ONLY MODE: Will skip training and only run evaluation")
-            print(f"📊 All stages: {', '.join(stages)}")
-            print(f"🔄 Incomplete stages: {', '.join(incomplete_stages)}")
-            print(f"💻 Device: {self.device}")
+                print("Eval-only mode: will skip training and only run evaluation")
+            print(f"Device: {self.device}")
             if batch_size:
-                print(f"📦 Batch size: {batch_size}")
+                print(f"Batch size: {batch_size}")
             if self.world_size > 1:
-                print(f"🌐 Distributed training with {self.world_size} GPUs")
+                print(f"Distributed training with {self.world_size} GPUs")
             print("=" * 80)
 
-        results = {}
+        if dist.is_initialized():
+            dist.barrier()
 
-        # Run only incomplete stages
-        for stage in incomplete_stages:
-            # Synchronize all ranks before starting each stage
-            if dist.is_initialized():
-                dist.barrier()
+        stage_results = self.stage6_psychotherapy_cot(
+            batch_size=batch_size,
+            eval_only=eval_only,
+            data_model_path=data_model_path,
+            combined_dir=combined_dir,
+            train_videos=train_videos,
+            val_videos=val_videos,
+            test_videos=test_videos,
+            base_checkpoint_path=base_checkpoint_path,
+        )
+        results = {"stage6_psychotherapy_cot": stage_results}
+        self._mark_stage_completed("stage6_psychotherapy_cot", stage_results)
 
-            if stage == "stage1_mcq":
-                stage_results = self.stage1_mcq(
-                    batch_size=batch_size, eval_only=eval_only
-                )
-                results[stage] = stage_results
-                self._mark_stage_completed(stage, stage_results)
-            elif stage == "stage2_captioning":
-                stage_results = self.stage2_captioning(
-                    batch_size=batch_size, eval_only=eval_only
-                )
-                results[stage] = stage_results
-                self._mark_stage_completed(stage, stage_results)
-            elif stage == "stage3_cot":
-                stage_results = self.stage3_cot(
-                    batch_size=batch_size, eval_only=eval_only
-                )
-                results[stage] = stage_results
-                self._mark_stage_completed(stage, stage_results)
-            elif stage == "stage4_sleep_cot":
-                stage_results = self.stage4_sleep_cot(
-                    batch_size=batch_size, eval_only=eval_only
-                )
-                results[stage] = stage_results
-                self._mark_stage_completed(stage, stage_results)
-            elif stage == "stage5_ecg_cot":
-                stage_results = self.stage5_ecg_cot(
-                    batch_size=batch_size, eval_only=eval_only
-                )
-                results[stage] = stage_results
-                self._mark_stage_completed(stage, stage_results)
-            elif stage == "stage6_psychotherapy_cot":
-                stage_results = self.stage6_psychotherapy_cot(
-                    batch_size=batch_size, eval_only=eval_only
-                )
-                results[stage] = stage_results
-                self._mark_stage_completed(stage, stage_results)
-            else:
-                if self.rank == 0:
-                    print(f"⚠️  Unknown stage: {stage}, skipping...")
+        if dist.is_initialized():
+            dist.barrier()
 
-            # Synchronize all ranks after completing each stage
-            if dist.is_initialized():
-                dist.barrier()
-
-        # Save overall results only on rank 0
         if self.rank == 0:
             overall_results_file = os.path.join(
                 self.results_dir, "curriculum_results.json"
@@ -1859,9 +1359,9 @@ class CurriculumTrainer:
             with open(overall_results_file, "w") as f:
                 json.dump(results, f, indent=2)
 
-            print(f"\n🎉 Curriculum Learning Complete!")
-            print(f"📁 All results saved to: {self.results_dir}/")
-            print(f"📊 Overall results: {overall_results_file}")
+            print("\nCurriculum complete")
+            print(f"All results saved to: {self.results_dir}/")
+            print(f"Overall results: {overall_results_file}")
 
         return results
 
@@ -1953,77 +1453,6 @@ class CurriculumTrainer:
         )
         return os.path.exists(checkpoint_path)
 
-    def _enable_lora_if_needed(self, stage_name: str):
-        """Enable LoRA for OpenTSLMSP models in stages after stage2."""
-        if self.model_type != "OpenTSLMSP":
-            return  # LoRA only for OpenTSLMSP
-
-        # Get the underlying model (handles DDP wrapping)
-        model = self._get_model()
-
-        # Enable LoRA for stages after stage2_captioning
-        stages_with_lora = ["stage3_cot", "stage4_sleep_cot", "stage5_ecg_cot"]
-
-        if stage_name in stages_with_lora:
-            if not getattr(model, "lora_enabled", False):
-                if self.rank == 0:
-                    print(f"🔧 Enabling LoRA for {stage_name}")
-                try:
-                    model.enable_lora(lora_r=16, lora_alpha=32, lora_dropout=0.0)
-                    if self.rank == 0:
-                        print(f"✅ LoRA enabled for {stage_name}")
-                except Exception as e:
-                    if self.rank == 0:
-                        print(f"❌ Failed to enable LoRA for {stage_name}: {e}")
-                        print("   Continuing without LoRA...")
-            else:
-                if self.rank == 0:
-                    print(f"✅ LoRA already enabled for {stage_name}")
-        else:
-            if self.rank == 0:
-                if stage_name in ["stage1_mcq", "stage2_captioning"]:
-                    print(
-                        f"ℹ️  LoRA disabled for {stage_name} (only enabled for stages 3+)"
-                    )
-                else:
-                    print(f"ℹ️  LoRA not configured for {stage_name}")
-
-    def _enable_lora_if_needed(self, stage_name: str):
-        """Enable LoRA for OpenTSLMSP models in stages after stage2."""
-        if self.model_type != "OpenTSLMSP":
-            return  # LoRA only for OpenTSLMSP
-
-        # Get the underlying model (handles DDP wrapping)
-        model = self._get_model()
-
-        # Enable LoRA for stages after stage2_captioning
-        stages_with_lora = ["stage3_cot", "stage4_sleep_cot", "stage5_ecg_cot"]
-
-        if stage_name in stages_with_lora:
-            if not getattr(model, "lora_enabled", False):
-                if self.rank == 0:
-                    print(f"🔧 Enabling LoRA for {stage_name}")
-                try:
-                    model.enable_lora(lora_r=16, lora_alpha=32, lora_dropout=0.0)
-                    if self.rank == 0:
-                        print(f"✅ LoRA enabled for {stage_name}")
-                except Exception as e:
-                    if self.rank == 0:
-                        print(f"❌ Failed to enable LoRA for {stage_name}: {e}")
-                        print("   Continuing without LoRA...")
-            else:
-                if self.rank == 0:
-                    print(f"✅ LoRA already enabled for {stage_name}")
-        else:
-            if self.rank == 0:
-                if stage_name in ["stage1_mcq", "stage2_captioning"]:
-                    print(
-                        f"ℹ️  LoRA disabled for {stage_name} (only enabled for stages 3+)"
-                    )
-                else:
-                    print(f"ℹ️  LoRA not configured for {stage_name}")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Curriculum Learning for OpenTSLM Models"
@@ -2036,13 +1465,6 @@ def main():
         help="Model type to train",
     )
     parser.add_argument(
-        "--stages",
-        nargs="+",
-        choices=CURRICULUM_STAGES,
-        default=CURRICULUM_STAGES,
-        help="Stages to run (default: all stages)",
-    )
-    parser.add_argument(
         "--device", type=str, default=None, help="Device to use (cuda, mps, cpu)"
     )
     parser.add_argument(
@@ -2050,6 +1472,44 @@ def main():
         type=int,
         default=None,
         help="Batch size for training (default: use value from model_config.py)",
+    )
+    parser.add_argument(
+        "--data_model_path",
+        type=str,
+        default="data_model.yaml",
+        help="Path to data_model.yaml for dyadic split",
+    )
+    parser.add_argument(
+        "--combined_dir",
+        type=str,
+        default="results/combined/",
+        help="Directory containing *_combined.json files",
+    )
+    parser.add_argument(
+        "--train_videos",
+        type=str,
+        default=None,
+        help="Comma-separated list of video IDs for training",
+    )
+    parser.add_argument(
+        "--val_videos",
+        type=str,
+        default=None,
+        help="Comma-separated list of video IDs for validation",
+    )
+    parser.add_argument(
+        "--test_videos",
+        type=str,
+        default=None,
+        help="Comma-separated list of video IDs for testing",
+    )
+    parser.add_argument(
+        "--base_checkpoint_path",
+        type=str,
+        default=os.path.join(
+            "results", "noxi", "psytslm", "noxi_cot", "checkpoints", "best_model.pt"
+        ),
+        help="Path to the base best_model.pt checkpoint",
     )
 
     # Evaluation arguments
@@ -2096,21 +1556,13 @@ def main():
         "--verbose", default=False, action="store_true", help="Enable verbose logging"
     )
 
-    # HuggingFace pretrained model arguments
-    parser.add_argument(
-        "--pretrained_repo",
-        type=str,
-        default=None,
-        help="HuggingFace repository ID to load pretrained model from (e.g., 'OpenTSLM/llama-3.2-3b-ecg-flamingo')",
-    )
-    parser.add_argument(
-        "--pretrained_checkpoint",
-        type=str,
-        default="model_checkpoint.pt",
-        help="Checkpoint filename in the HuggingFace repo (default: 'model_checkpoint.pt')",
-    )
-
     args = parser.parse_args()
+
+    def _parse_list(value: Optional[str]) -> Optional[List[str]]:
+        if value is None:
+            return None
+        items = [item.strip() for item in value.split(",") if item.strip()]
+        return items or None
 
     # Set up global logging
     set_global_verbose(args.verbose)
@@ -2127,15 +1579,17 @@ def main():
         llm_id=args.llm_id,
     )
 
-    # Load pretrained model from HuggingFace if specified
-    if args.pretrained_repo:
-        trainer.load_pretrained_from_huggingface(
-            repo_id=args.pretrained_repo,
-            filename=args.pretrained_checkpoint
-        )
-
-    # Run curriculum
-    results = trainer.run_curriculum(args.stages, args.batch_size, args.eval_only)
+    # Run curriculum (stage6 only)
+    results = trainer.run_curriculum(
+        batch_size=args.batch_size,
+        eval_only=args.eval_only,
+        data_model_path=args.data_model_path,
+        combined_dir=args.combined_dir,
+        train_videos=_parse_list(args.train_videos),
+        val_videos=_parse_list(args.val_videos),
+        test_videos=_parse_list(args.test_videos),
+        base_checkpoint_path=args.base_checkpoint_path,
+    )
 
     # Print summary
     logger.info("Final Results Summary:")

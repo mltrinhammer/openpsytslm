@@ -35,9 +35,9 @@ def load_dyadic_cot_splits(
     Args:
         data_model_path: Path to data_model.yaml (from map_speaker_to_aus.py)
         combined_dir: Directory containing {video_id}_combined.json files
-        train_videos: List of video IDs for training (if None, uses first 70%)
-        val_videos: List of video IDs for validation (if None, uses next 15%)
-        test_videos: List of video IDs for test (if None, uses last 15%)
+        train_videos: List of video IDs for training (if None, uses all but 1 val + 1 test)
+        val_videos: List of video IDs for validation (if None, uses 1 video)
+        test_videos: List of video IDs for test (if None, uses 1 video)
         max_samples: Maximum samples per split (for debugging; None = no limit)
         feature_columns: List of AU column names to extract (default: all AU*_r columns)
                         Example: ['AU04_r'] for debug mode with single feature
@@ -62,23 +62,23 @@ def load_dyadic_cot_splits(
         data_model = yaml.safe_load(f)
     
     # Get all video IDs
-    all_video_ids = list(data_model.keys())
+    all_video_ids = sorted(list(data_model.keys()))
     
-    # Create default splits if not provided (80/15/5)
+    # Create default splits if not provided (single test session)
     # Split is done at VIDEO level - all turns from a video stay in the same split
     if train_videos is None and val_videos is None and test_videos is None:
         n_total = len(all_video_ids)
-        n_train = int(0.80 * n_total)
-        n_val = int(0.15 * n_total)
-        # Ensure at least 1 video in test set
-        n_test = max(1, n_total - n_train - n_val)
-        n_val = n_total - n_train - n_test  # Adjust val if needed
-        
+        n_test = min(1, n_total)
+        n_val = min(1, max(0, n_total - n_test))
+        n_train = max(0, n_total - n_val - n_test)
+
         train_videos = all_video_ids[:n_train]
         val_videos = all_video_ids[n_train:n_train + n_val]
         test_videos = all_video_ids[n_train + n_val:]
-        
-        print(f"[dyadic_loader] Video-level split: train={len(train_videos)}, val={len(val_videos)}, test={len(test_videos)}")
+
+        print(
+            f"[dyadic_loader] Video-level split: train={len(train_videos)}, val={len(val_videos)}, test={len(test_videos)}"
+        )
     
     train_videos_set = set(train_videos or [])
     val_videos_set = set(val_videos or [])
